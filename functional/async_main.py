@@ -1,7 +1,7 @@
 '''
 async_main.py
-a simple test application to validate this multiprocess design
-usage: $ python async_main.py num_elems num_procs
+a simple asynchronous multiprocess ETL pipeline
+usage: $ python async_main.py num_elements num_workers
 Author: Raymond Gasper
 '''
 
@@ -27,8 +27,8 @@ log_config = {
         },
     },
     "handlers": {
-        "daily": {
-            # daily log is for high-level application health information
+        "timed": {
+            # for high-level application health information
             "level"       : "INFO",
             "class"       : "logging.handlers.TimedRotatingFileHandler",
             "formatter"   : "default",
@@ -36,13 +36,13 @@ log_config = {
             "when"        : "H",
             "backupCount" : 14,
         },
-        "debug": {
-            # debug logger is for high-volume stuff that's unimportant if the app is
+        "sized": {
+            # for high-volume stuff that's unimportant if the app is
             # working but so very clutch to see if the app breaks. 
             "level"       : "DEBUG",
             "class"       : "logging.handlers.RotatingFileHandler",
             "formatter"   : "verbose",
-            "filename"    : 'log_rotating',
+            "filename"    : 'log_sized',
             "backupCount" : 1, # 0 induces handler to never rotate the file
             "maxBytes"     : 1024*1024*256 # 256 MB
         },
@@ -53,10 +53,8 @@ log_config = {
         },
     },
     "loggers": {
-        # root | emptystr is a special name that allows any logger in the application to use it
-        # if you use a loggger with a different name, imported libraries may not log properly
         "": {
-            "handlers" : ["stream","debug","daily"],
+            "handlers" : ["stream","sized","timed"],
             "level"    : "INFO",
         },
     },
