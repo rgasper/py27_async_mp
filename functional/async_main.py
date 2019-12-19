@@ -57,7 +57,7 @@ log_config = {
         # if you use a loggger with a different name, imported libraries may not log properly
         "": {
             "handlers" : ["stream","debug","daily"],
-            "level"    : "DEBUG", # send everything to handlers
+            "level"    : "INFO",
         },
     },
 }
@@ -66,6 +66,8 @@ dictConfig(log_config)
 install_mp_handler() 
 
 def pipeline(num_elems, num_procs):
+    assert num_elems > 0
+    assert num_procs > 0
     info('setting up')
     results_queue = Queue()
     input_queue   = Queue()
@@ -73,7 +75,7 @@ def pipeline(num_elems, num_procs):
     producer_p = Process(
         target = producer,
         args   = (
-            args.num_elems,
+            num_elems,
             input_queue,
         ),
     )
@@ -81,7 +83,7 @@ def pipeline(num_elems, num_procs):
         target = manager,
         args   = (
             input_queue,
-            args.num_procs,
+            num_procs,
             poisonPill, 
             worker,
             (input_queue, results_queue, poisonPill),
@@ -91,7 +93,7 @@ def pipeline(num_elems, num_procs):
         target = consumer,
         args   = (
             results_queue,
-            args.num_elems,
+            num_elems,
         )
     )
     try:
@@ -101,7 +103,7 @@ def pipeline(num_elems, num_procs):
         manager_p.start()
         consumer_p.start()
         producer_p.join()
-        info('asking main to stop')
+        info('telling manager that producer is finished')
         with poisonPill.get_lock():
             poisonPill.value = int(True)
         manager_p.join()
@@ -110,8 +112,8 @@ def pipeline(num_elems, num_procs):
         dur = time() - start_time
         info('pipeline took {d:2f}s to process {i} elements with {n} parallel processes'.format(
             d = dur,
-            i = args.num_elems,
-            n = args.num_procs
+            i = num_elems,
+            n = num_procs
         ))
     except KeyboardInterrupt:
         exception('user terminated pipeline')

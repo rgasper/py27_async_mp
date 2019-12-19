@@ -27,13 +27,26 @@ def worker(in_queue, out_queue, poisonPill):
     out_queue.put(j)
     return
 
+
 def consumer(out_queue, expected_num_results):
     ''' does something with the ETL results '''
     r_count = 0
+    log_progress = False
+    if expected_num_results > 999:
+        log_progress = True
+        has_logged = False
     while True:
         _ = out_queue.get()
         r_count += 1
         debug('result gotten')
+        if log_progress:
+            progress = int(float(r_count)/expected_num_results * 100)
+            if progress % 10 == 0:
+                if not has_logged:
+                    info('pipeline {}% complete'.format(progress))
+                    has_logged = True
+            else:
+                has_logged = False
         if r_count == expected_num_results:
             info('finished with expected number of result elements')
             return
