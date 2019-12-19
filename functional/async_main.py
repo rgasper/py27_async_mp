@@ -94,24 +94,31 @@ def pipeline(num_elems, num_procs):
             args.num_elems,
         )
     )
-    info('running pipeline')
-    start_time = time()
-    producer_p.start()
-    manager_p.start()
-    consumer_p.start()
-    producer_p.join()
-    info('asking main to stop')
-    with poisonPill.get_lock():
-        poisonPill.value = int(True)
-    manager_p.join()
-    consumer_p.join()
-    info('pipeline finished')
-    dur = time() - start_time
-    info('pipeline took {d:2f}s to process {i} elements with {n} parallel processes'.format(
-        d = dur,
-        i = args.num_elems,
-        n = args.num_procs
-    ))
+    try:
+        info('running pipeline')
+        start_time = time()
+        producer_p.start()
+        manager_p.start()
+        consumer_p.start()
+        producer_p.join()
+        info('asking main to stop')
+        with poisonPill.get_lock():
+            poisonPill.value = int(True)
+        manager_p.join()
+        consumer_p.join()
+        info('pipeline finished')
+        dur = time() - start_time
+        info('pipeline took {d:2f}s to process {i} elements with {n} parallel processes'.format(
+            d = dur,
+            i = args.num_elems,
+            n = args.num_procs
+        ))
+    except KeyboardInterrupt:
+        exception('user terminated pipeline')
+        producer_p.terminate()
+        manager_p.terminate()
+        consumer_p.terminate()
+        raise
 
 if __name__ == "__main__":
 
