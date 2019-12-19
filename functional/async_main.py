@@ -106,6 +106,8 @@ def pipeline(num_elems, num_procs):
             poisonPill.value = int(True)
         manager_p.join()
         consumer_p.join()
+        input_queue.close()
+        results_queue.close()
         info('pipeline finished')
         dur = time() - start_time
         info('pipeline took {d:2f}s to process {i} elements with {n} parallel processes'.format(
@@ -118,6 +120,8 @@ def pipeline(num_elems, num_procs):
         producer_p.terminate()
         manager_p.terminate()
         consumer_p.terminate()
+        input_queue.close()
+        results_queue.close()
         raise
 
 if __name__ == "__main__":
