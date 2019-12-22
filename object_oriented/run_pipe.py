@@ -51,16 +51,16 @@ log_config = {
     "loggers": {
         "": {
             "handlers" : ["stream"],
-            "level"    : "INFO",
+            "level"    : "DEBUG", # id recommend changing to info for many elements
         },
     },
 }
 dictConfig(log_config)
 
-num_elements = 10000
-element_size = 1000
-num_serial_workers = 4
-num_parallel_workers = 25
+num_elements = 100
+element_size = 10
+num_serial_workers = 2
+num_parallel_workers = 2
 
 def my_producer(num_elements, element_size):
     for _ in range(num_elements):
