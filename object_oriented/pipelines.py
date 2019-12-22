@@ -102,15 +102,19 @@ def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
         n_processes: int- number concurrent processes
         flag: multiprocessing.Value- flag provided that indicates no further input data
     '''
-    # keep constant size objects, or pool can be a source of memory issues
+    # NOTE: NEVER pull work element data into the manager. This could cause memory leaks.
+    # all tracking data is statically sized (or the best we can do in python)- keeps memory use bounded
     pool = {i:None for i in range(n_processes)}
     proc_time_tracker = {i:0 for i in range(n_processes)}
     n_completed_procs, avg_duration = 0, 0.0
     empties_limit, empties = int(ln(n_processes)*2)+1, 0
     info('mgr {}: started'.format(tag))
+    # quits if there appears to be no work to do
     while empties < empties_limit:
+        # check if the workers have anything to do once every while
+        # TODO this waits excessively long if there is only one process
         sleep(max(0.01, 2*avg_duration/float(n_processes)))
-        if bool(flag.value): # no lock, as only reading
+        if bool(flag.value): # no lock, only reading
             if in_queue.empty():
                 empties += 1
                 if empties > 1:
@@ -120,6 +124,7 @@ def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
                     ))
             else:
                 empties = 0
+        # start unused workers, or replace completed ones
         for i, p in pool.iteritems():
             if p is None:
                 debug('mgr {}: starting a worker'.format(tag))
@@ -146,7 +151,6 @@ def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
                 n_completed_procs += 1
                 diff = worker_duration - avg_duration
                 avg_duration += float(diff)/n_completed_procs
-
     info('mgr {}: done, average worker element wait+work time: {:.5f}s'.format(tag, avg_duration))
     return
 
@@ -178,21 +182,22 @@ class ConcurrentSingleElementPipeline:
     the producer function.
 
     If you want data from the pipeline to pass into the main thread, DO NOT accumulate into a queue
-    that does not have a main process thread async collecting. It will cause weird errors. See run_pipe.py
-    for a more detailed description.
+    unless there is a main process thread async collecting. It will cause weird errors. 
+    See run_pipe.py for a more detailed description.
     '''
     # TODO: allow producer_func to also be a producer_object (GeneratorType)
     #       complications:
     #           requires another _producer func
     #           requires ignoring producer_config_args
     # TODO: allow worker processes to grab multiple inputs before dying to reduce overhead
-    #       complications (may just be able to ignore?): 
+    #       complications (may just be able to ignore as defaults could be mostly safe?): 
     #           tuning how many are allowed (including picking a default)
     #           dealing with wildly inconsistent data element sizes
     #           on completion: rename class to ConcurrentPipeline
     # TODO: any way to allow just copying the full function args, not just "config" args?
-    #       complications:
     #           I am honestly unsure if this is possible
+    # ?TODO?: implement backlog time estimates for each serial manager
+    #           I am not sure it matters to anyone
     def __init__(self, 
         producer_func, producer_config_args,
         pipe_funcs, pipe_funcs_config_args, pipe_n_procs,
@@ -247,8 +252,8 @@ class ConcurrentSingleElementPipeline:
         except:
             raise AssertionError('must provide work for the pipe to do')
         # contract satisfied
-        self.N = len(pipe_funcs) # called plenty so I tokenized it
-        # pipe child process logs into main thread
+        self.N = len(pipe_funcs) # used all over in here
+        # setup handlers to send child process logs into main thread's logger
         install_mp_handler()
         self.producer_func = producer_func
         self.producer_config_args = producer_config_args
@@ -257,7 +262,7 @@ class ConcurrentSingleElementPipeline:
         self.pipe_n_procs = pipe_n_procs
         self.consumer_func = consumer_func
         self.consumer_config_args = consumer_config_args
-        # use a manager server to make cleanup easy
+        # using a manager server to make cleanup easy
         self._sync_server = Manager()
         # 1 manager for each pipe func
         self._managers = [None for _ in range(self.N)]
@@ -270,6 +275,7 @@ class ConcurrentSingleElementPipeline:
 
     def run(self):
         ''' execute the pipeline '''
+        # let user know what they've asked for very clearly
         struct_str = "Running pipeline with structure:\n"
         struct_str += "{} serial transformations, with {} queues\n\n".format(self.N, len(self._queues))
         struct_str += "Producer: {}\n".format(self.producer_func)
@@ -313,7 +319,7 @@ class ConcurrentSingleElementPipeline:
             )
         try:
             start_time = time()
-            # start everyone
+            # start all child processes
             self._producer.start()
             [self._managers[i].start() for i in range(self.N)]
             self._consumer.start()
@@ -325,23 +331,20 @@ class ConcurrentSingleElementPipeline:
                 info('flagged mgr {}'.format(i))
                 self._managers[i].join()
             self._flags[-1].value = int(True)
-            info('flagged consumer')
+            # some simple math to let the user know how long to wait if the consumer is backed up
             duration = time() - start_time
             elems_remaining = self._total_produced.value - self._total_consumed.value
             time_per_element = float(duration)/self._total_consumed.value
-            info('estimated {} elements left in consumer input queue, should take {} seconds'.format(
+            info('flagged consumer. around {} elements left to consume, should take {} seconds'.format(
                 elems_remaining, time_per_element*elems_remaining
             ))
             self._consumer.join()
             # check for data loss
             if self._total_consumed.value != self._total_produced.value:
-                n = self._total_produced.value - self._total_consumed.value
-                p = 100 * (1 - float(self._total_consumed.value)/float(self._total_produced.value))
+                n_lost = self._total_produced.value - self._total_consumed.value
+                pct_lost = 100 * (1 - float(self._total_consumed.value)/float(self._total_produced.value))
                 try:
-                    raise Warning('Pipeline appears to have lost {n} data elements, about {p:2f}% of the total produced'.format(
-                        n = n,
-                        p = p,
-                    ))
+                    raise Warning('Pipeline appears to have lost {n} data elements, about {p:2f}% of the total produced'.format(n = n_lost, p = pct_lost))
                 except:
                     exception('DATA LOSS WARNING:')
             # congratulate ourselves on our success
@@ -350,7 +353,7 @@ class ConcurrentSingleElementPipeline:
                 rate = float(self._total_consumed.value)/float(dur)
             except ZeroDivisionError:
                 rate = float('nan')
-            info('pipeline finished. took {d:2f}s, throughput of approx. {r:2f} elements/second'.format(
+            info('pipeline finished. took {d:2f}s, throughput of approximately {r:2f} elements/second'.format(
                 d = dur,
                 r = rate,
             ))
@@ -359,7 +362,7 @@ class ConcurrentSingleElementPipeline:
             exception('user terminated pipeline')
             raise
         finally:
-            # make sure to cleanup no matter what happens
+            info('cleaning up child processes')
             self._sync_server.shutdown()
             self._producer.terminate()
             [self._managers[i].terminate() for i in range(self.N)]
