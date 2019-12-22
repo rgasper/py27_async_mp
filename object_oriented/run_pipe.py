@@ -32,6 +32,8 @@ from pipelines import ConcurrentSingleElementPipeline
 
 from logging.config import dictConfig
 from logging import debug, info, error
+from random import randint
+from time import sleep
 
 log_config = {
     "version": 1,
@@ -57,10 +59,10 @@ log_config = {
 }
 dictConfig(log_config)
 
-num_elements = 100
-element_size = 10
-num_serial_workers = 2
-num_parallel_workers = 2
+num_elements = 1000
+element_size = 100
+num_serial_workers = 3
+num_parallel_workers = 10
 
 def my_producer(num_elements, element_size):
     for _ in range(num_elements):
@@ -68,6 +70,7 @@ def my_producer(num_elements, element_size):
 
 # first (and in this case only) argument is input data
 def my_worker(inp):
+    sleep(randint(0,500)/100.0)
     return [i**2 for i in inp]
 
 # first (and only) argument is input data
