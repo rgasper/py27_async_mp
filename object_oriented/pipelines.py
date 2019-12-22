@@ -11,21 +11,21 @@ Author: Raymond Gasper
 '''
 
 from logging import debug, info, exception
-from multiprocessing import Process, Queue, Value
+from multiprocessing import Process, Manager
 from multiprocessing_logging import install_mp_handler
 from time import sleep, time
 from queue import Empty
 from math import log as ln
 from inspect import isgeneratorfunction
 from types import GeneratorType
+# from random import randint # used to simulate data loss
 
 def _producer(out_queue, total, producer_func, producer_config_args):
     ''' pushes stuff into the pipeline, dies when there is no more work'''
     info('starting')
     for i in producer_func(*producer_config_args):
         out_queue.put(i)
-        with total.get_lock():
-            total.value += 1
+        total.value += 1
 
 
 def _worker(in_queue, out_queue, worker_func, worker_config_args):
@@ -39,28 +39,41 @@ def _worker(in_queue, out_queue, worker_func, worker_config_args):
 def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
     ''' does something with the pipeline results, like writing to storage '''
     info('started')
-    while True:
-        if bool(flag.value):
-            break
+    avg_wait = 0
+    while not bool(flag.value):
         try:
             r = in_queue.get_nowait()
+            wait_start = time()
         except Empty:
             sleep(0.01)
             continue
+        # if randint(0,1):
+        #     # simulate dropping data
+        #     continue
         consumer_func(r, *consumer_config_args)
-        with total.get_lock():
-            total.value += 1
-            debug('consumed {}, total results: {}'.format(r, total.value))
-    info('all transformations completed, consuming remaining data')
-    while True:
+        total.value += 1
+        wait = time() - wait_start
+        diff = wait - avg_wait
+        avg_wait += float(diff)/total.value
+        # debug('consumed {}, total results: {}'.format(r, total.value))
+        debug('total consumed: {}'.format(total.value))
+    empties_limit, empties = 5, 0
+    while empties < empties_limit:
+        sleep(avg_wait/2)
+        if in_queue.empty():
+            empties += 1
+            if empties > 1:
+                debug('{} consecutive empty queue checks'.format(empties))
         try:
-            r = in_queue.get_nowait()
-            consumer_func(r, *consumer_config_args)
-            with total.get_lock():
-                total.value += 1
-                debug('consumed {}, total results: {}'.format(r, total.value))
+            r = in_queue.get(timeout=avg_wait/2)
+            empties = 0
         except Empty:
-            return
+            continue
+        consumer_func(r, *consumer_config_args)
+        total.value += 1
+        # debug('consumed {}, total results: {}'.format(r, total.value))
+        debug('total consumed: {}'.format(total.value))
+    info('all data consumed')
 
 
 def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
@@ -79,20 +92,20 @@ def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
     pool = {i:None for i in range(n_processes)}
     proc_time_tracker = {i:0 for i in range(n_processes)}
     n_completed_procs, avg_duration = 0, 0.0
-    empty_repeat_limit, repeats = int(ln(n_processes)*2)+1, 0
+    empties_limit, empties = int(ln(n_processes)*2)+1, 0
     info('mgr {}: started'.format(tag))
-    while True:
+    while empties < empties_limit:
         sleep(max(0.01, 2*avg_duration/float(n_processes)))
         if bool(flag.value): # no lock, as only reading
             if in_queue.empty():
-                repeats += 1
-            if repeats > 0:
-                debug('mgr {}: {} consecutive empty queue checks'.format(
-                    tag,
-                    repeats
-                ))
-            if repeats > empty_repeat_limit:
-                break
+                empties += 1
+                if empties > 1:
+                    debug('mgr {}: {} consecutive empty queue checks'.format(
+                        tag,
+                        empties
+                    ))
+            else:
+                empties = 0
         for i, p in pool.iteritems():
             if p is None:
                 debug('mgr {}: starting a worker'.format(tag))
@@ -120,7 +133,7 @@ def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
                 diff = worker_duration - avg_duration
                 avg_duration += float(diff)/n_completed_procs
 
-    info('mgr {}: done, average worker element process time: {:.5f}s'.format(tag, avg_duration))
+    info('mgr {}: done, average worker element wait+work time: {:.5f}s'.format(tag, avg_duration))
     return
 
 
@@ -145,7 +158,11 @@ class ConcurrentSingleElementPipeline:
     sanitation and error handling. All this does is manage process pools and data queues. 
     Pipe_funcs are daemonized and so cannot have their own child processes.
 
-    see tests.py for simple examples of allowable functions
+    see run_pipe.py for simple examples of allowable functions
+
+    If you want data from the pipeline to pass into the main thread, DO NOT accumulate into a queue
+    that does not have a main process thread async collecting. It will cause weird errors. See run_pipe.py
+    for a more detailed description.
     '''
     # TODO: make class just return data as a generator if consumer is not provided
     # TODO: allow producer_func to instead be a producer_object (GeneratorType)
@@ -203,24 +220,26 @@ class ConcurrentSingleElementPipeline:
         except:
             raise AssertionError('must provide work for the pipe to do')
         # contract satisfied
+        self.N = len(pipe_funcs) # called plenty so I tokenized it
+        # pipe child process logs into main thread
+        install_mp_handler()
         self.producer_func = producer_func
         self.producer_config_args = producer_config_args
         self.pipe_funcs = pipe_funcs
-        self.N = len(pipe_funcs) # called plenty so I tokenized it
         self.pipe_funcs_config_args = pipe_funcs_config_args
         self.pipe_n_procs = pipe_n_procs
         self.consumer_func = consumer_func
         self.consumer_config_args = consumer_config_args
+        # use a manager server to make cleanup easy
+        self._sync_server = Manager()
         # 1 manager for each pipe func
         self._managers = [None for _ in range(self.N)]
         # 1 producer finished flag for each manager, 1 for the consumer
-        self._flags = [Value('i',0) for _ in range(self.N+1)]
+        self._flags = [self._sync_server.Value('i',0) for _ in range(self.N+1)]
         # 1 out(in) queue per pipe_func, + 1 extra in(out)
-        self._queues = [Queue() for _ in range(self.N+1)]
-        self._total_produced = Value('i',0)
-        self._total_consumed = Value('i',0)
-        # pipe child process logs into main thread
-        install_mp_handler()
+        self._queues = [self._sync_server.Queue() for _ in range(self.N+1)]
+        self._total_produced = self._sync_server.Value('i',0)
+        self._total_consumed = self._sync_server.Value('i',0)
 
     def run(self):
         ''' execute the pipeline '''
@@ -275,22 +294,35 @@ class ConcurrentSingleElementPipeline:
             self._producer.join()
             info('producer completed')
             for i in range(self.N):
-                with self._flags[i].get_lock():
-                    self._flags[i].value = int(True)
-                    info('flagged mgr {}'.format(i))
+                self._flags[i].value = int(True)
+                info('flagged mgr {}'.format(i))
                 self._managers[i].join()
-            with self._flags[-1].get_lock():
-                self._flags[-1].value = int(True)
-                info('flagged consumer')
+            self._flags[-1].value = int(True)
+            info('flagged consumer')
+            duration = time() - start_time
+            elems_remaining = self._total_produced.value - self._total_consumed.value
+            info('estimated {} elements left in consumer input queue'.format(elems_remaining))
+            # NOTE (gasperr)
+            #   this silly logic is b/c for some unknown reason the consumer doesn't join properly
+            #   when too much data is input through the pipe (even tho it reaches return statement) 
+            # try:
+            #     time_per_element = float(duration)/self._total_consumed.value
+            # except ZeroDivisionError:
+            #     time_per_element = 0
+            # est_time_remaining = time_per_element*elems_remaining
+            # self._consumer.join(timeout = max((est_time_remaining,time_per_element*5)))
             self._consumer.join()
             # check for data loss
             if self._total_consumed.value != self._total_produced.value:
                 n = self._total_produced.value - self._total_consumed.value
                 p = 100 * (1 - float(self._total_consumed.value)/float(self._total_produced.value))
-                Warning('Pipeline appears to have lost {n} data elements, about {p:2f}% of the total produced'.format(
-                    n = n,
-                    p = p,
-                ))
+                try:
+                    raise Warning('Pipeline appears to have lost {n} data elements, about {p:2f}% of the total produced'.format(
+                        n = n,
+                        p = p,
+                    ))
+                except:
+                    exception('DATA LOSS WARNING:')
             # congratulate ourselves on our success
             dur = time() - start_time
             try:
@@ -301,14 +333,17 @@ class ConcurrentSingleElementPipeline:
                 d = dur,
                 r = rate,
             ))
+            return
         except KeyboardInterrupt:
             exception('user terminated pipeline')
+            raise
+        finally:
+            # make sure to cleanup no matter what happens
+            self._sync_server.shutdown()
             self._producer.terminate()
             [self._managers[i].terminate() for i in range(self.N)]
             self._consumer.terminate()
-            raise
-        finally:
-            [q.close() for q in self._queues]
+
 
 
 
