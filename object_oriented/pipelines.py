@@ -140,7 +140,9 @@ def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
 class ConcurrentSingleElementPipeline:
     ''' Runs a concurrent asynchronous ETL pipeline with the provided functions.
     Currently only allows single producer, single consumer, but multiple serial pipe 
-    functions. Worker Processes restricted handling one input element at a time.
+    functions. Worker Processes restricted to handling one input element at a time.
+
+    see run_pipe.py for simple example usage
 
     The funcs and matching args must be defined carefully!
     - producer function must be a generator function
@@ -149,7 +151,7 @@ class ConcurrentSingleElementPipeline:
     - In case of flawed data, pass nothing. class will check to see if number of produced
         elements at the start matches the number of consumed elements at the end
 
-    In pipe_funcs, order matters!
+    When defining pipe_funcs, order matters!
     - first pipe_func receives input from producer
     - following pipe_funcs receives from previous, send to next
     - last pipe_func sends to consumer
@@ -158,14 +160,25 @@ class ConcurrentSingleElementPipeline:
     sanitation and error handling. All this does is manage process pools and data queues. 
     Pipe_funcs are daemonized and so cannot have their own child processes.
 
-    see run_pipe.py for simple examples of allowable functions
+    If you want to use poisonPills to control consumer or worker behavior, just yield at the end of 
+    the producer function.
 
     If you want data from the pipeline to pass into the main thread, DO NOT accumulate into a queue
     that does not have a main process thread async collecting. It will cause weird errors. See run_pipe.py
     for a more detailed description.
     '''
-    # TODO: make class just return data as a generator if consumer is not provided
-    # TODO: allow producer_func to instead be a producer_object (GeneratorType)
+    # TODO: allow producer_func to also be a producer_object (GeneratorType)
+    #       complications:
+    #           requires another _producer func
+    #           requires ignoring producer_config_args
+    # TODO: allow worker processes to grab multiple inputs before dying to reduce overhead
+    #       complications (may just be able to ignore?): 
+    #           tuning how many are allowed (including picking a default)
+    #           dealing with wildly inconsistent data element sizes
+    #           on completion: rename class to ConcurrentPipeline
+    # TODO: any way to allow just copying the full function args, not just "config" args?
+    #       complications:
+    #           I am honestly unsure if this is possible
     def __init__(self, 
         producer_func, producer_config_args,
         pipe_funcs, pipe_funcs_config_args, pipe_n_procs,
@@ -343,11 +356,6 @@ class ConcurrentSingleElementPipeline:
             self._producer.terminate()
             [self._managers[i].terminate() for i in range(self.N)]
             self._consumer.terminate()
-
-
-
-
-
 
 
 if __name__ == "__main__":
