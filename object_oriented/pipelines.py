@@ -5,7 +5,7 @@ classes that can be used as the base of ETL pipelines. Pipeline characteristics:
     - design prevents unbounded memory/process number growth that can occur in 
         multiprocess ETL python applications
     - process management will dominate usage if work elements are small
-    - attempts to implement multiprocess logging
+    - attempts to implement multiprocess logging (works in my tests, see run_pipe.py)
 
 Author: Raymond Gasper
 '''
@@ -17,11 +17,16 @@ from time import sleep, time
 from queue import Empty
 from math import log as ln
 from inspect import isgeneratorfunction
-from types import GeneratorType
+# TODO from types import GeneratorType
 # from random import randint # used to simulate data loss
 
 def _producer(out_queue, total, producer_func, producer_config_args):
-    ''' pushes stuff into the pipeline, dies when there is no more work'''
+    ''' pushes stuff into the pipeline, dies when there is no more work 
+    :params:
+        out_queue - multiprocessing.Queue: where to put outgoing data
+        total - multiprocessing.Value: track how many elements were generated
+        producer_func - callable, generator: generates data
+        producer_config_args - tuple: - any arguments required by producer_func'''
     info('starting')
     for i in producer_func(*producer_config_args):
         out_queue.put(i)
@@ -29,7 +34,11 @@ def _producer(out_queue, total, producer_func, producer_config_args):
 
 
 def _worker(in_queue, out_queue, worker_func, worker_config_args):
-    ''' grabs input, does some work, pushes results, and dies '''
+    ''' grabs input, does some work, pushes results, and dies
+    in_queue - multiprocessing.Queue: where to get incoming data
+    out_queue - multiprocessing.Queue: where to put outgoing data
+    worker_func - callable: does something to the data
+    worker_config_args - tuple: all arguments except first (input data) for worker'''
     i = in_queue.get()
     debug('working')
     r = worker_func(i, *worker_config_args)
@@ -37,7 +46,12 @@ def _worker(in_queue, out_queue, worker_func, worker_config_args):
 
 
 def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
-    ''' does something with the pipeline results, like writing to storage '''
+    ''' does something with the pipeline results, like writing to storage     
+    :params:
+        in_queue - multiprocessing.Queue: where to get incoming data
+        total - multiprocessing.Value: track how many elements were generated
+        consumer_func - callable, generator: generates data
+        consumer_config_args - tuple: - any arguments required by conusmer_func'''
     info('started')
     avg_wait = 0
     while not bool(flag.value):
@@ -314,16 +328,10 @@ class ConcurrentSingleElementPipeline:
             info('flagged consumer')
             duration = time() - start_time
             elems_remaining = self._total_produced.value - self._total_consumed.value
-            info('estimated {} elements left in consumer input queue'.format(elems_remaining))
-            # NOTE (gasperr)
-            #   this silly logic is b/c for some unknown reason the consumer doesn't join properly
-            #   when too much data is input through the pipe (even tho it reaches return statement) 
-            # try:
-            #     time_per_element = float(duration)/self._total_consumed.value
-            # except ZeroDivisionError:
-            #     time_per_element = 0
-            # est_time_remaining = time_per_element*elems_remaining
-            # self._consumer.join(timeout = max((est_time_remaining,time_per_element*5)))
+            time_per_element = float(duration)/self._total_consumed.value
+            info('estimated {} elements left in consumer input queue, should take {} seconds'.format(
+                elems_remaining, time_per_element*elems_remaining
+            ))
             self._consumer.join()
             # check for data loss
             if self._total_consumed.value != self._total_produced.value:
