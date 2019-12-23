@@ -42,6 +42,7 @@ def _worker(in_queue, out_queue, worker_func, worker_config_args):
     i = in_queue.get()
     debug('working')
     r = worker_func(i, *worker_config_args)
+    in_queue.task_done()
     out_queue.put(r)
 
 
@@ -54,40 +55,25 @@ def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
         consumer_config_args - tuple: - any arguments required by conusmer_func'''
     info('started')
     avg_wait = 0
-    while not bool(flag.value):
+    while True:
+        sleep(max((0.01, avg_wait/5)))
+        start = time()
+        if bool(flag.value) and in_queue.empty():
+            debug("consumer input queue is closed and empty")
+            break
         try:
             r = in_queue.get_nowait()
-            wait_start = time()
-        except Empty:
-            sleep(0.01)
-            continue
-        # if randint(0,1):
-        #     # simulate dropping data
-        #     continue
-        consumer_func(r, *consumer_config_args)
-        total.value += 1
-        wait = time() - wait_start
-        diff = wait - avg_wait
-        avg_wait += float(diff)/total.value
-        # debug('consumed {}, total results: {}'.format(r, total.value))
-        debug('total consumed: {}'.format(total.value))
-    empties_limit, empties = 5, 0
-    while empties < empties_limit:
-        sleep(avg_wait/2)
-        if in_queue.empty():
-            empties += 1
-            if empties > 1:
-                debug('{} consecutive empty queue checks'.format(empties))
-        try:
-            r = in_queue.get(timeout=avg_wait/2)
-            empties = 0
+            consumer_func(r, *consumer_config_args)
+            in_queue.task_done()
+            # debug('consumed {}, total results: {}'.format(r, total.value))
+            debug('total consumed: {}'.format(total.value))
+            total.value += 1
+            wait = time() - start
+            diff = wait - avg_wait
+            avg_wait += float(diff)/total.value
         except Empty:
             continue
-        consumer_func(r, *consumer_config_args)
-        total.value += 1
-        # debug('consumed {}, total results: {}'.format(r, total.value))
-        debug('total consumed: {}'.format(total.value))
-    info('all data consumed')
+    info('completed')
 
 
 def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
@@ -97,7 +83,7 @@ def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
         tag: printable - an identifier for this manager
         in_queue: multiprocessing.Queue- input data for workers. manager observes queue 
             status, but does not access any queued data directly
-        worker_func: function- worker function. Will be daemonized.
+        worker_func: callable- worker function. Will be daemonized.
         worker_config_args: tuple- arguments for worker function that aren't the input data
         n_processes: int- number concurrent processes
         flag: multiprocessing.Value- flag provided that indicates no further input data
@@ -106,20 +92,12 @@ def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
     pool = {i:None for i in range(n_processes)}
     proc_time_tracker = {i:0 for i in range(n_processes)}
     n_completed_procs, avg_duration = 0, 0.0
-    empties_limit, empties = int(ln(n_processes)*2)+1, 0
     info('mgr {}: started'.format(tag))
-    while empties < empties_limit:
+    while True:
         sleep(max(0.01, 2*avg_duration/float(n_processes)))
-        if bool(flag.value): # no lock, as only reading
-            if in_queue.empty():
-                empties += 1
-                if empties > 1:
-                    debug('mgr {}: {} consecutive empty queue checks'.format(
-                        tag,
-                        empties
-                    ))
-            else:
-                empties = 0
+        if bool(flag.value) and in_queue.empty():
+            debug("mgr {}: input queue is closed and empty".format(tag))
+            break
         for i, p in pool.iteritems():
             if p is None:
                 debug('mgr {}: starting a worker'.format(tag))
@@ -146,7 +124,6 @@ def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
                 n_completed_procs += 1
                 diff = worker_duration - avg_duration
                 avg_duration += float(diff)/n_completed_procs
-
     info('mgr {}: done, average worker element wait+work time: {:.5f}s'.format(tag, avg_duration))
     return
 
@@ -321,19 +298,15 @@ class ConcurrentSingleElementPipeline:
             self._producer.join()
             info('producer completed')
             for i in range(self.N):
+                self._queues[i].join()
                 self._flags[i].value = int(True)
                 info('flagged mgr {}'.format(i))
                 self._managers[i].join()
+            self._queues[-1].value = int(True)
             self._flags[-1].value = int(True)
             info('flagged consumer')
-            duration = time() - start_time
-            elems_remaining = self._total_produced.value - self._total_consumed.value
-            time_per_element = float(duration)/self._total_consumed.value
-            info('estimated {} elements left in consumer input queue, should take {} seconds'.format(
-                elems_remaining, time_per_element*elems_remaining
-            ))
             self._consumer.join()
-            # check for data loss
+            # check for data loss, but dont raise
             if self._total_consumed.value != self._total_produced.value:
                 n = self._total_produced.value - self._total_consumed.value
                 p = 100 * (1 - float(self._total_consumed.value)/float(self._total_produced.value))
