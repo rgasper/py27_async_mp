@@ -59,10 +59,11 @@ log_config = {
 }
 dictConfig(log_config)
 
-num_elements = 100
+num_elements = 55
 element_size = 10
-num_serial_workers = 5
-num_parallel_workers = 5
+num_serial_workers = 3
+num_parallel_workers = 3
+worker_get_limit = 10
 
 def my_producer(num_elements, element_size):
     for _ in range(num_elements):
@@ -98,6 +99,7 @@ etl = ConcurrentSingleElementPipeline(
     pipe_funcs              = tuple([my_worker]*num_serial_workers),
     pipe_funcs_config_args  = tuple([()]*num_serial_workers),
     pipe_n_procs            = tuple([num_parallel_workers]*num_serial_workers),
+    worker_get_limit        = worker_get_limit
 )
 etl.run()
-info('if my_consumer didnt throw an assertion error, it worked!')
+info('no major errors in main process, check logs to see if there was data loss or issues in child processes')

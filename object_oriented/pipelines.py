@@ -33,17 +33,20 @@ def _producer(out_queue, total, producer_func, producer_config_args):
         total.value += 1
 
 
-def _worker(in_queue, out_queue, worker_func, worker_config_args):
+def _worker(in_queue, out_queue, worker_func, worker_config_args, worker_get_limit):
     ''' grabs input, does some work, pushes results, and dies
     in_queue - multiprocessing.Queue: where to get incoming data
     out_queue - multiprocessing.Queue: where to put outgoing data
     worker_func - callable: does something to the data
-    worker_config_args - tuple: all arguments except first (input data) for worker'''
-    i = in_queue.get()
-    debug('working')
-    r = worker_func(i, *worker_config_args)
-    in_queue.task_done()
-    out_queue.put(r)
+    worker_config_args - tuple: all arguments except first (input data) for worker
+    worker_get_limit: int- number of times workers get and process data before dying
+    '''
+    for _ in range(worker_get_limit):
+        i = in_queue.get()
+        debug('working')
+        r = worker_func(i, *worker_config_args)
+        in_queue.task_done()
+        out_queue.put(r)
 
 
 def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
@@ -76,7 +79,7 @@ def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
     info('completed')
 
 
-def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
+def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag, worker_get_limit):
     ''' manages a set of concurrent processes defined by worker_func and worker_config_args 
     does not deliver or return any data 
     :params:
@@ -87,6 +90,7 @@ def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag):
         worker_config_args: tuple- arguments for worker function that aren't the input data
         n_processes: int- number concurrent processes
         flag: multiprocessing.Value- flag provided that indicates no further input data
+        worker_get_limit: int- number of times workers get and process data before dying
     '''
     # keep constant size objects, or pool can be a source of memory issues
     pool = {i:None for i in range(n_processes)}
@@ -162,20 +166,20 @@ class ConcurrentSingleElementPipeline:
     #       complications:
     #           requires another _producer func
     #           requires ignoring producer_config_args
-    # TODO: allow worker processes to grab multiple inputs before dying to reduce overhead
-    #       complications (may just be able to ignore?): 
-    #           tuning how many are allowed (including picking a default)
-    #           dealing with wildly inconsistent data element sizes
-    #           on completion: rename class to ConcurrentPipeline
     # TODO: any way to allow just copying the full function args, not just "config" args?
     #       complications:
     #           I am honestly unsure if this is possible
+    # TODO: implement returning results
     def __init__(self, 
         producer_func, producer_config_args,
         pipe_funcs, pipe_funcs_config_args, pipe_n_procs,
         consumer_func, consumer_config_args,
-        return_results = False):
+        worker_get_limit=5):
         # enforce the contract.
+        try:
+            assert isinstance(worker_get_limit, int) and worker_get_limit > 1
+        except:
+            raise AssertionError('worker_get_limit must be an integer > 1')
         # check functions
         try:
             assert callable(producer_func)
@@ -234,6 +238,7 @@ class ConcurrentSingleElementPipeline:
         self.pipe_n_procs = pipe_n_procs
         self.consumer_func = consumer_func
         self.consumer_config_args = consumer_config_args
+        self.worker_get_limit = worker_get_limit
         # use a manager server to make cleanup easy
         self._sync_server = Manager()
         # 1 manager for each pipe func
@@ -283,9 +288,16 @@ class ConcurrentSingleElementPipeline:
                     i,
                     self._queues[i],
                     _worker,
-                    (self._queues[i],self._queues[i+1],self.pipe_funcs[i], self.pipe_funcs_config_args[i]),
+                    (
+                        self._queues[i],
+                        self._queues[i+1],
+                        self.pipe_funcs[i],
+                        self.pipe_funcs_config_args[i],
+                        self.worker_get_limit
+                    ),
                     self.pipe_n_procs[i],
-                    self._flags[i]
+                    self._flags[i],
+                    self.worker_get_limit
                 ),
             )
         try:
