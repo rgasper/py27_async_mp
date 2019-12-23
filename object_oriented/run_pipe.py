@@ -4,29 +4,8 @@ running validation of result accuracy
 pipeline validates no data loss
 
 logging works, memory is stable, CTRL-c works as fast as the workers can get to it,
-and exit is clean - no child process left behind.
+and exit is always clean - no child process left behind.
 -nice-
-
-Notes:
-SO i've done some experimenting and if you want to get data out of the pipeline,
-you have two options:
-    - _constantly_ consume from an output queue in another thread/process. 
-        If you let it accumulate, it will eventually block forever with no error
-        even if you use put_nowait() or put(block=False) in the consumer. see WEIRD QUEUE ERROR
-        (using Python 2.7 and Mac OS X)
-    - write to an external data store (csv, database)
-
-WEIRD QUEUE ERROR:
-If you accumulate data into a Queue for collection into Main Thread, a weird error can occur!
-The ConcurrentSingleElementPipeline._consumer will never successfully join. It gets to it's return
-statement, will execute code after the last queue.put().
-I'm 95% sure this is what is happening, and have tested thoroughly. 
-It makes _absolutely_ no sense to me. Maybe need to use managers instead of multiprocessing.Queue
-
-Memory usage:
-I've tested upto 10K elements of 1000 integer long lists with 4 serial pools of 25 concurrent workers,
-and have seen no evidence of memory load increasing during runtime. The main thread consumed a frightening
-260 MB of memory but it stayed constant during runtime.
 '''
 from pipelines import ConcurrentSingleElementPipeline
 

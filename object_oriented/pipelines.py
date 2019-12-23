@@ -1,13 +1,34 @@
 '''
 classes that can be used as the base of ETL pipelines. Pipeline characteristics:
-    - work and management functions for a bounded (in memory and cpu usage), logged, 
+    - work and management functions for a memory bounded, logged, 
         and fully asynchronous multiprocess ETL application
     - design prevents unbounded memory/process number growth that can occur in 
         multiprocess ETL python applications
     - process management will dominate usage if work elements are small
-    - attempts to implement multiprocess logging (works in my tests, see run_pipe.py)
+    - attempts to implement multiprocess logging
 
 Author: Raymond Gasper
+
+Usage Notes:
+- Getting data out of the pipeline-
+you have two options:
+    - *concurrently* consume from an output queue in another thread/process. 
+        WARNING! if you just accumulate into the queue and dont collect concurrently, 
+            the pipeline will never finish (it will block on consumer.join())
+        WARNING! if you do not use queue.task_done() the pipeline will never finish
+    - write to an external data store (csv, database)
+
+- Logging -
+easiest and only currently verified way:
+    - from logging import debug, info, warn, error, critical
+    - put loglevel() calls in your work functions
+    - use a dictConfig() at the very top of main .py
+
+Memory stability testing:
+I've tested upto 10K elements of 1000 integer long lists with 4 serial pools of 
+25 concurrent workers, and have seen no evidence of memory load increasing during 
+runtime. The main thread allocated a somewhat frightening 260 MB of memory (no work 
+data, just child process info) but it stayed constant during runtime!
 '''
 
 from logging import debug, info, exception
@@ -21,7 +42,8 @@ from inspect import isgeneratorfunction
 # from random import randint # used to simulate data loss
 
 def _producer(out_queue, total, producer_func, producer_config_args):
-    ''' pushes stuff into the pipeline, dies when there is no more work 
+    ''' A generator that pushes stuff into the pipeline, 
+    dies when there is no more work 
     :params:
         out_queue - multiprocessing.Queue: where to put outgoing data
         total - multiprocessing.Value: track how many elements were generated
@@ -39,7 +61,7 @@ def _worker(in_queue, out_queue, worker_func, worker_config_args, worker_get_lim
     out_queue - multiprocessing.Queue: where to put outgoing data
     worker_func - callable: does something to the data
     worker_config_args - tuple: all arguments except first (input data) for worker
-    worker_get_limit: int- number of times workers get and process data before dying
+    worker_get_limit: int- number of times worker gets and processes data before dying
     '''
     for _ in range(worker_get_limit):
         i = in_queue.get()
@@ -50,7 +72,7 @@ def _worker(in_queue, out_queue, worker_func, worker_config_args, worker_get_lim
 
 
 def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
-    ''' does something with the pipeline results, like writing to storage     
+    ''' does something with the pipeline results, like writing to storage    
     :params:
         in_queue - multiprocessing.Queue: where to get incoming data
         total - multiprocessing.Value: track how many elements were generated
@@ -79,9 +101,8 @@ def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
     info('completed')
 
 
-def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag, worker_get_limit):
-    ''' manages a set of concurrent processes defined by worker_func and worker_config_args 
-    does not deliver or return any data 
+def _manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag, worker_get_limit):
+    ''' manages a set of concurrent daemon child processes until the data is gone, then dies
     :params:
         tag: printable - an identifier for this manager
         in_queue: multiprocessing.Queue- input data for workers. manager observes queue 
@@ -135,16 +156,13 @@ def manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag, w
 class ConcurrentSingleElementPipeline:
     ''' Runs a concurrent asynchronous ETL pipeline with the provided functions.
     Currently only allows single producer, single consumer, but multiple serial pipe 
-    functions. Worker Processes restricted to handling one input element at a time.
+    worker functions (in concurrent pools!). Workers restricted to handling one input 
+    element at a time. Will automatically check for lost data at end of execution.
 
-    see run_pipe.py for simple example usage
-
-    The funcs and matching args must be defined carefully!
+    !NOTE! The functions and matching args must be defined carefully!
     - producer function must be a generator function
     - pipe functions must take an input data object as their _first_ argument
     - consumer function must take an input data as its _first_ argument
-    - In case of flawed data, pass nothing. class will check to see if number of produced
-        elements at the start matches the number of consumed elements at the end
 
     When defining pipe_funcs, order matters!
     - first pipe_func receives input from producer
@@ -153,14 +171,8 @@ class ConcurrentSingleElementPipeline:
     
     all functions (producer, pipe_funcs, and consumer) are responsible for their own input
     sanitation and error handling. All this does is manage process pools and data queues. 
-    Pipe_funcs are daemonized and so cannot have their own child processes.
-
-    If you want to use poisonPills to control consumer or worker behavior, just yield at the end of 
-    the producer function.
-
-    If you want data from the pipeline to pass into the main thread, DO NOT accumulate into a queue
-    that does not have a main process thread async collecting. It will cause weird errors. See run_pipe.py
-    for a more detailed description.
+    Pipe_funcs are daemonized and so cannot have their own child processes. Do your best to
+    not use poisonPills, it will be very hard to ensure data queue behavior that makes sense.
     '''
     # TODO: allow producer_func to also be a producer_object (GeneratorType)
     #       complications:
@@ -283,7 +295,7 @@ class ConcurrentSingleElementPipeline:
         )
         for i in range(self.N):
             self._managers[i] = Process(
-                target = manager,
+                target = _manager,
                 args = (
                     i,
                     self._queues[i],
