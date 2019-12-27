@@ -7,7 +7,7 @@ logging works, memory is stable, CTRL-c works as fast as the workers can get to 
 and exit is always clean - no child process left behind.
 -nice-
 '''
-from pipelines import ConcurrentSingleElementPipeline
+from pipelines import SimplePipeline, SimpleCollectorPipeline
 
 from logging.config import dictConfig
 from logging import debug, info, error
@@ -38,11 +38,11 @@ log_config = {
 }
 dictConfig(log_config)
 
-num_elements = 55
+num_elements = 25
 element_size = 10
 num_serial_workers = 3
-num_parallel_workers = 3
-worker_get_limit = 10
+num_parallel_workers = 4
+worker_get_limit = 7
 
 def my_producer(num_elements, element_size):
     for _ in range(num_elements):
@@ -70,7 +70,7 @@ def my_consumer(inp, num_elements, element_size):
         ))
 
 info('constructing pipeline')
-etl = ConcurrentSingleElementPipeline(
+etl = SimplePipeline(
     producer_func           = my_producer,
     producer_config_args    = (num_elements, element_size),
     consumer_func           = my_consumer,
@@ -81,4 +81,19 @@ etl = ConcurrentSingleElementPipeline(
     worker_get_limit        = worker_get_limit
 )
 etl.run()
+info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
+
+
+info('constructing collector pipeline')
+etl = SimpleCollectorPipeline(
+    producer_func           = my_producer,
+    producer_config_args    = (num_elements, element_size),
+    pipe_funcs              = tuple([my_worker]*num_serial_workers),
+    pipe_funcs_config_args  = tuple([()]*num_serial_workers),
+    pipe_n_procs            = tuple([num_parallel_workers]*num_serial_workers),
+    worker_get_limit        = worker_get_limit
+)
+results = etl.run()
+for result in results:
+    my_consumer(result, num_elements, element_size)
 info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
