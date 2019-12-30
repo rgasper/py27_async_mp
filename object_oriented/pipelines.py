@@ -31,6 +31,9 @@ runtime. The main thread allocated a somewhat frightening 260 MB of memory (no w
 data, just child process info) but it stayed constant during runtime!
 '''
 
+# TODO: stop pipelines when child process raises an error
+
+
 from logging import debug, info, exception
 from multiprocessing_logging import install_mp_handler
 from multiprocessing import Process, Manager
