@@ -32,6 +32,7 @@ data, just child process info) but it stayed constant during runtime!
 '''
 
 # TODO: stop pipelines when child process raises an error
+# TODO: allow a persistent consumer option that intakes the queue
 
 
 from logging import debug, info, exception
