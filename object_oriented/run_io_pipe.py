@@ -7,7 +7,7 @@ logging works, memory is stable, CTRL-c works as fast as the workers can get to 
 and exit is always clean - no child process left behind.
 -nice-
 '''
-from pipelines import MySQLPipeline
+from pipelines import DatabasePipeline
 
 from logging.config import dictConfig
 from logging import debug, info, error
@@ -50,17 +50,17 @@ class mock_connection:
     ''' a little tester object, looks like a mysql database
     connection if you squint real hard '''
     def __init__(self, element_size):
-        self.status = False
+        self.connected = False
         self.element_size = element_size
     def connect(self, credentials):
         debug('connecting to {}'.format(credentials))
-        self.status = True
+        self.connected = True
     def close(self):
-        self.status = False
+        self.connected = False
     def is_open(self):
-        return self.status
+        return self.connected
     def execute(self, query):
-        if not self.status:
+        if not self.connected:
             raise RuntimeError('connection is not open cannot execute')
         sleep(0.01)
         debug('"executed" a query: {}'.format(query))
@@ -117,7 +117,6 @@ def io_consumer(inp, connection, element_size):
             inp
         ))
 
-connection_class = mock_connection
 producer_creds = credentials.format('a producer')
 worker_creds = credentials.format('io workers')
 consumer_creds = credentials.format('io consumers')
@@ -158,12 +157,13 @@ func_types_list.append(('io_consumer_pool',))
 
 
 info('constructing pipeline')
-etl = MySQLPipeline(
-    funcs              = tuple(func_list),
+etl = DatabasePipeline(
+    connection_class    = mock_connection,
+    funcs               = tuple(func_list),
     funcs_types         = tuple(func_types_list),
     funcs_config_args   = tuple(func_args_list),
     funcs_pool_sizes    = tuple(func_n_list),
-    n_repeats       = worker_get_limit,
+    n_repeats           = worker_get_limit,
 )
 etl.run()
 info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
