@@ -32,8 +32,9 @@ data, just child process info) but it stayed constant during runtime!
 '''
 
 # TODO: stop pipelines when child process raises an error
-# TODO: allow a persistent consumer option that intakes the queue
-
+# TODO: somehow make worker time info more useful
+#           only start tracking time once the queue has data?
+# FIXME: add kwargs options to everything
 
 from logging import debug, info, exception
 from multiprocessing_logging import install_mp_handler
@@ -61,12 +62,14 @@ def _producer(out_queue, total, producer_func, producer_config_args):
 
 
 def _worker(in_queue, out_queue, worker_func, worker_config_args, worker_get_limit):
-    ''' grabs input, does some work, pushes results, and dies
-    in_queue - multiprocessing.Queue: where to get incoming data
-    out_queue - multiprocessing.Queue: where to put outgoing data
-    worker_func - callable: does something to the data
-    worker_config_args - tuple: all arguments except first (input data) for worker
-    worker_get_limit: int- number of times worker gets and processes data before dying
+    ''' grabs input, does some work, pushes results, and dies. Not intended to run
+    on its own but to be created by a _manager
+    :params:
+        in_queue - multiprocessing.Queue: where to get incoming data
+        out_queue - multiprocessing.Queue: where to put outgoing data
+        worker_func - callable: does something to the data
+        worker_config_args - tuple: all arguments except first (input data) for worker
+        worker_get_limit: int- number of times worker gets and processes data before dying
     '''
     for _ in range(worker_get_limit):
         i = in_queue.get()
@@ -80,9 +83,9 @@ def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
     ''' does something with the pipeline results, like writing to storage    
     :params:
         in_queue - multiprocessing.Queue: where to get incoming data
-        total - multiprocessing.Value: track how many elements were generated
-        consumer_func - callable, generator: generates data
-        consumer_config_args - tuple: - any arguments required by conusmer_func
+        total - multiprocessing.Value: track how many elements were consumed
+        consumer_func - callable: does the consuming work
+        consumer_config_args - tuple: - all arguments except first (input data) for consumer
         flag: multiprocessing.Value- flag provided that indicates no further input data
     '''
     info('started')
@@ -108,14 +111,50 @@ def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
     info('completed')
 
 
-def _proc_manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag, worker_get_limit):
-    ''' manages a set of concurrent daemon child processes until the data is gone, then dies
+def _io_thread(in_queue, connection, total, io_func, io_func_config_args, flag):
+    ''' does something with the pipeline results, like writing to storage
+    :params:
+        in_queue - multiprocessing.Queue: where to get incoming data
+        connection: shareable network IO connection- shared between the threads 
+        total - multiprocessing.Value: track how many elements were consumed
+        io_func - callable: pushes the data along the connection
+        io_func_config_args - tuple: - all arguments except first two (input data, connection) for io func
+        flag: multiprocessing.Value- flag provided that indicates no further input data
+    '''
+    info('started')
+    avg_wait = 0
+    while True:
+        sleep(max((0.01, avg_wait/5)))
+        start = time()
+        if bool(flag.value) and in_queue.empty():
+            debug("consumer input queue is closed and empty")
+            break
+        try:
+            r = in_queue.get_nowait()
+            io_func(r, connection, *io_func_config_args)
+            in_queue.task_done()
+            # debug('consumed {}, total results: {}'.format(r, total.value))
+            debug('total consumed: {}'.format(total.value))
+            total.value += 1
+            wait = time() - start
+            diff = wait - avg_wait
+            avg_wait += float(diff)/total.value
+        except Empty:
+            continue
+    info('completed')
+
+
+def _proc_manager(
+    tag, in_queue, worker_func, worker_args, n_processes, flag, worker_get_limit
+    ):
+    ''' process that manages a set of concurrent daemon child processes. Constantly restarts processes
+    in order to clear up memory
     :params:
         tag: printable - an identifier for this manager
         in_queue: multiprocessing.Queue- input data for workers. manager observes queue 
             status, but does not access any queued data directly
         worker_func: callable- worker function. Daemonized to allow interrupts.
-        worker_config_args: tuple- arguments for worker function that aren't the input data
+        worker_args: tuple- positional arguments for worker function
         n_processes: int- number concurrent processes
         flag: multiprocessing.Value- flag provided that indicates no further input data
         worker_get_limit: int- number of times workers get and process data before dying
@@ -136,7 +175,7 @@ def _proc_manager(tag, in_queue, worker_func, worker_config_args, n_processes, f
                 debug('mgr {}: starting a worker'.format(tag))
                 new_p = Process(
                     target = worker_func,
-                    args = worker_config_args,
+                    args = worker_args,
                 )
                 new_p.daemon = True
                 new_p.start()
@@ -147,7 +186,7 @@ def _proc_manager(tag, in_queue, worker_func, worker_config_args, n_processes, f
                 debug('mgr {}: replacing a worker'.format(tag))
                 new_p = Process(
                     target = worker_func,
-                    args = worker_config_args,
+                    args = worker_args,
                 )
                 new_p.daemon = True
                 new_p.start()
@@ -157,7 +196,53 @@ def _proc_manager(tag, in_queue, worker_func, worker_config_args, n_processes, f
                 n_completed_procs += 1
                 diff = worker_duration - avg_duration
                 avg_duration += float(diff)/n_completed_procs
-    info('mgr {}: done, average worker element wait+work time: {:.5f}s'.format(tag, avg_duration))
+    info('mgr {}: done, average worker process wait+work time per element: {:.5f}s'.format(tag, avg_duration))
+    return
+
+
+def _io_thread_manager(
+    tag, in_queue, connection, io_func, io_config_args, n_threads, flag, io_func_get_limit
+    ):
+    ''' process that manages a set of concurrent threads that perform io until the data is gone, 
+    then dies
+    :params:
+        tag: printable - an identifier for this manager
+        in_queue: multiprocessing.Queue- input data for io threads. manager observes queue 
+            status, but does not access any queued data directly
+        connection: shareable network IO connection- shared between the threads 
+        io_func: callable- worker function. Daemonized to allow interrupts.
+        io_config_args: tuple- arguments for io function that aren't the input data or the connection
+        n_threads: int- number concurrent io threads
+        flag: multiprocessing.Value- flag provided that indicates no further input data
+        io_func_get_limit: int- number of times workers get and process data before dying
+    '''
+    # NOTE: NEVER pull work element data into the manager. This could cause memory leaks.
+    # all tracking data is statically sized (or the best we can do in python)- keeps memory use bounded
+    pool = {i:None for i in range(n_threads)}
+    thread_time_tracker = {i:0 for i in range(n_threads)}
+    n_completed_threads, avg_duration = 0, 0.0
+    info('mgr {}: started'.format(tag))
+    for i, t in pool.iteritems():
+        if t is None:
+            debug('mgr {}: starting a worker'.format(tag))
+            new_t = Thread(
+                target = io_func,
+                args = (connection, io_config_args),
+            )
+            new_t.daemon = True
+            new_t.start()
+            thread_time_tracker[i] = time()
+            pool[i] = new_t
+    # silly logic to see if a thread is done but allow interrupts to come through
+    while True:
+        if all(t is None for _, t in pool.iteritems()):
+            break
+        sleep(max(0.01, 2*avg_duration/float(n_threads)))
+        for i, t in pool.iteritems():
+            t.join(max(0.01, avg_duration/float(n_threads)))
+            if not t.is_alive():
+                pool[i] = None
+    info('io mgr {}: done, average io_thread wait+io time per element: {:.5f}s'.format(tag, avg_duration))
     return
 
 
