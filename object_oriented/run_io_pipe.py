@@ -7,7 +7,7 @@ logging works, memory is stable, CTRL-c works as fast as the workers can get to 
 and exit is always clean - no child process left behind.
 -nice-
 '''
-from pipelines import Pipeline
+from pipelines import MySQLPipeline
 
 from logging.config import dictConfig
 from logging import debug, info, error
@@ -38,6 +38,7 @@ log_config = {
 }
 dictConfig(log_config)
 
+info('setting up definitions for pipeline testing')
 num_elements = 25
 element_size = 10
 num_serial_workers = 3
@@ -97,7 +98,7 @@ def io_worker(inp, connection):
 # For IO consumers
 # first argument is input data
 # second argument is connection
-def io_consumer(inp, connection, num_elements, element_size):
+def io_consumer(inp, connection, element_size):
     ''' checks that our result is what we thought we'd get '''
     assert connection.is_open()
     expected_val = range(element_size)
@@ -116,48 +117,53 @@ def io_consumer(inp, connection, num_elements, element_size):
             inp
         ))
 
-info('setting up connections')
-mc_consumers = mock_connection(element_size)
+connection_class = mock_connection
 producer_creds = credentials.format('a producer')
 worker_creds = credentials.format('io workers')
 consumer_creds = credentials.format('io consumers')
 # build worker definition tuples
-pipe_func_list = []
-pipe_func_args_list = []
-pipe_func_n_list = []
-pipe_func_types_list = []
+func_list = []
+func_args_list = []
+func_n_list = []
+func_types_list = []
 i = 0
+# add producer
+func_list.append(io_producer)
+func_args_list.append((credentials, num_elements, element_size,))
+func_n_list.append(1) # doesnt matter for producer, just has to be a number.
+func_types_list.append(('producer',))
+# add workers
 while True:
     # cpu worker
-    pipe_func_list.append(cpu_worker)
-    pipe_func_args_list.append((element_size,))
-    pipe_func_n_list.append(num_parallel_workers)
-    pipe_func_types_list.append(('cpu',))
+    func_list.append(cpu_worker)
+    func_args_list.append((element_size,))
+    func_n_list.append(num_parallel_workers)
+    func_types_list.append(('cpu_pool',))
     i += 1
     if not i < num_serial_workers:
         break
     # io worker - 5x longer wait, 5x more workers (threads tho!)
-    pipe_func_list.append(io_worker)
-    pipe_func_args_list.append(())
-    pipe_func_n_list.append(5*num_parallel_workers)
-    pipe_func_types_list.append(('io', worker_creds))
+    func_list.append(io_worker)
+    func_args_list.append(())
+    func_n_list.append(5*num_parallel_workers)
+    func_types_list.append(('io_pool', worker_creds))
     i += 1
     if not i < num_serial_workers:
         break
+# add consumer
+func_list.append(io_consumer)
+func_args_list.append((element_size,))
+func_n_list.append(5*num_parallel_workers)
+func_types_list.append(('io_consumer_pool',))
+
 
 info('constructing pipeline')
-etl = Pipeline(
-    producer_func           = io_producer,
-    producer_config_args    = (producer_creds, num_elements, element_size),
-    # no producer func type, as the Pipeline doesnt have to manage its input
-    consumer_func           = io_consumer,
-    consumer_config_args    = (num_elements, element_size,),
-    consumer_func_type      = ('io', consumer_creds),
-    pipe_funcs              = tuple(pipe_func_list),
-    pipe_funcs_config_args  = tuple(pipe_func_args_list),
-    pipe_n_procs            = tuple(pipe_func_n_list),
-    pipe_func_types         = tuple(pipe_func_types_list),
-    worker_get_limit        = worker_get_limit,
+etl = MySQLPipeline(
+    funcs              = tuple(func_list),
+    funcs_types         = tuple(func_types_list),
+    funcs_config_args   = tuple(func_args_list),
+    funcs_pool_sizes    = tuple(func_n_list),
+    n_repeats       = worker_get_limit,
 )
 etl.run()
 info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
