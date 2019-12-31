@@ -108,7 +108,7 @@ def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
     info('completed')
 
 
-def _manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag, worker_get_limit):
+def _proc_manager(tag, in_queue, worker_func, worker_config_args, n_processes, flag, worker_get_limit):
     ''' manages a set of concurrent daemon child processes until the data is gone, then dies
     :params:
         tag: printable - an identifier for this manager
@@ -305,7 +305,7 @@ class SimplePipeline:
         )
         for i in range(self.N):
             self._managers[i] = Process(
-                target = _manager,
+                target = _proc_manager,
                 args = (
                     i,
                     self._queues[i],
@@ -514,7 +514,7 @@ class SimpleCollectorPipeline:
         self._consumer.daemon = True
         for i in range(self.N):
             self._managers[i] = Process(
-                target = _manager,
+                target = _proc_manager,
                 args = (
                     i,
                     self._queues[i],
