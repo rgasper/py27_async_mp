@@ -49,11 +49,12 @@ credentials = 'a fake database for {}'
 class mock_connection:
     ''' a little tester object, looks like a mysql database
     connection if you squint real hard '''
-    def __init__(self, element_size):
+    def __init__(self, element_size, credentials):
         self.connected = False
         self.element_size = element_size
-    def connect(self, credentials):
-        debug('connecting to {}'.format(credentials))
+        self.credentials = credentials
+    def connect(self):
+        debug('connecting to {}'.format(self.credentials))
         self.connected = True
     def close(self):
         self.connected = False
@@ -117,27 +118,27 @@ def io_consumer(inp, connection, element_size):
             inp
         ))
 
-producer_creds = credentials.format('a producer')
-worker_creds = credentials.format('io workers')
-consumer_creds = credentials.format('io consumers')
+producer_conn = credentials.format('a producer')
+worker_conn = credentials.format('io workers')
+consumer_conn = credentials.format('io consumers')
 # build worker definition tuples
 func_list = []
 func_args_list = []
 func_n_list = []
-func_types_list = []
+func_meta_tups_list = []
 i = 0
 # add producer
 func_list.append(io_producer)
 func_args_list.append((credentials, num_elements, element_size,))
 func_n_list.append(1) # doesnt matter for producer, just has to be a number.
-func_types_list.append(('producer',))
+func_meta_tups_list.append(('producer',))
 # add workers
 while True:
     # cpu worker
     func_list.append(cpu_worker)
     func_args_list.append((element_size,))
     func_n_list.append(num_parallel_workers)
-    func_types_list.append(('cpu_pool',))
+    func_meta_tups_list.append(('cpu_pool',))
     i += 1
     if not i < num_serial_workers:
         break
@@ -145,7 +146,7 @@ while True:
     func_list.append(io_worker)
     func_args_list.append(())
     func_n_list.append(5*num_parallel_workers)
-    func_types_list.append(('io_pool', worker_creds))
+    func_meta_tups_list.append(('io_pool', worker_creds))
     i += 1
     if not i < num_serial_workers:
         break
@@ -153,14 +154,14 @@ while True:
 func_list.append(io_consumer)
 func_args_list.append((element_size,))
 func_n_list.append(5*num_parallel_workers)
-func_types_list.append(('io_consumer_pool',))
+func_meta_tups_list.append(('io_consumer_pool',))
 
 
 info('constructing pipeline')
 etl = DatabasePipeline(
     connection_class    = mock_connection,
     funcs               = tuple(func_list),
-    funcs_types         = tuple(func_types_list),
+    funcs_types         = tuple(func_meta_tups_list),
     funcs_config_args   = tuple(func_args_list),
     funcs_pool_sizes    = tuple(func_n_list),
     n_repeats           = worker_get_limit,
