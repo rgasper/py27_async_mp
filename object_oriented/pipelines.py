@@ -59,6 +59,7 @@ def _producer(out_queue, total, producer_func, producer_config_args):
     for i in producer_func(*producer_config_args):
         out_queue.put(i)
         total.value += 1
+        debug('total produced: {}'.format(total.value))
 
 
 def _worker(in_queue, out_queue, worker_func, worker_config_args, worker_get_limit):
@@ -169,7 +170,7 @@ def _proc_manager(
 
 class SimplePipeline:
     ''' A concurrent asynchronous ETL pipeline that runs the provided functions.
-    Currently only allows single producer, single consumer, but multiple serial pipe 
+    Currently allows multiple producer, single consumer, but multiple serial pipe 
     worker functions (in concurrent pools!). Workers restricted to handling one input 
     element at a time. Will warn user if there appears to be lost data at end of execution.
 
@@ -207,20 +208,33 @@ class SimplePipeline:
             assert isinstance(worker_get_limit, int) and worker_get_limit > 1
         except:
             raise AssertionError('worker_get_limit must be an integer > 1')
+        # allow multiple producers
+        self._multiple_producers = isinstance(producer_func, tuple)
         # check functions
         try:
-            assert callable(producer_func)
+            if self._multiple_producers:
+                for func in producer_func:
+                    assert callable(func)
+            else:
+                assert callable(producer_func)
+        except:
+            raise AssertionError('must provide a callable function for producer')
+        try:
             assert callable(consumer_func)
         except:
-            raise AssertionError('must provide a callable function')
+            raise AssertionError('must provide a callable function for consumer')
         try:
-            assert isgeneratorfunction(producer_func)
+            if self._multiple_producers:
+                for func in producer_func:
+                    assert isgeneratorfunction(func)
+            else:
+                assert isgeneratorfunction(producer_func)
         except:
-            raise AssertionError('producer function must be a generator function')
+            raise AssertionError('producer function(s) must (all) be a generator function')
         try:
             assert isinstance(pipe_funcs, tuple)
         except:
-            raise AssertionError('must supply a tuple of callable functions')
+            raise AssertionError('must supply a tuple of callable functions for pipe_funcs')
         for pf in pipe_funcs:
             try:
                 assert callable(pf)
@@ -228,7 +242,11 @@ class SimplePipeline:
                 raise AssertionError('all elements inside of pipe_funcs must be callable functions')
         # check arguments
         try:
-            assert isinstance(producer_config_args, tuple)
+            if self._multiple_producers:
+                for args in producer_config_args:
+                    assert isinstance(args, tuple)
+            else:
+                assert isinstance(producer_config_args, tuple)
             assert isinstance(consumer_config_args, tuple)
         except:
             raise AssertionError('function arguments must be provided as a tuple')
@@ -282,7 +300,7 @@ class SimplePipeline:
         # let user know what they've asked for very clearly
         struct_str = "Running pipeline with structure:\n"
         struct_str += "{} serial transformations, with {} queues\n\n".format(self.N, len(self._queues))
-        struct_str += "Producer: {}\n".format(self.producer_func)
+        struct_str += "Producer(s): {}\n".format(self.producer_func)
         for i in range(self.N):
             struct_str += "\tQueue {}: {}\n".format(i,self._queues[i])
             struct_str += "{} Workers: {}\n".format(self.pipe_n_procs[i], self.pipe_funcs[i])
@@ -290,15 +308,30 @@ class SimplePipeline:
         struct_str += "Consumer: {}\n".format(self.consumer_func)
         info(struct_str)
         # define processes
-        self._producer = Process(
-            target = _producer,
-            args   = (
-                self._queues[0],
-                self._total_produced,
-                self.producer_func,
-                self.producer_config_args
-            ),
-        )
+        self._producers = []
+        if self._multiple_producers:
+            for func, args in zip(self.producer_func, self.producer_config_args):
+                _a_producer = Process(
+                    target = _producer,
+                    args   = (
+                        self._queues[0],
+                        self._total_produced,
+                        func,
+                        args,
+                    ),
+                )
+                self._producers.append(_a_producer)
+        else:
+            _a_producer = Process(
+                target = _producer,
+                args   = (
+                    self._queues[0],
+                    self._total_produced,
+                    self.producer_func,
+                    self.producer_config_args,
+                ),
+            )
+            self._producers.append(_a_producer)
         self._consumer = Process(
             target = _consumer,
             args   = (
@@ -331,12 +364,14 @@ class SimplePipeline:
         try:
             start_time = time()
             # start all child processes
-            self._producer.start()
+            for p in self._producers:
+                p.start()
             [self._managers[i].start() for i in range(self.N)]
             self._consumer.start()
             # join in order
-            self._producer.join()
-            info('producer completed')
+            for p in self._producers:
+                p.join()
+            info('producer(s) completed')
             for i in range(self.N):
                 self._queues[i].join()
                 self._flags[i].value = int(True)
@@ -371,7 +406,7 @@ class SimplePipeline:
         finally:
             info('cleaning up child processes')
             self._sync_server.shutdown()
-            self._producer.terminate()
+            [p.terminate() for p in self._producers]
             [self._managers[i].terminate() for i in range(self.N)]
             self._consumer.terminate()
 
@@ -400,19 +435,29 @@ class SimpleCollectorPipeline:
             assert isinstance(worker_get_limit, int) and worker_get_limit > 1
         except:
             raise AssertionError('worker_get_limit must be an integer > 1')
+        # allow multiple producers
+        self._multiple_producers = isinstance(producer_func, tuple)
         # check functions
         try:
-            assert callable(producer_func)
+            if self._multiple_producers:
+                for func in producer_func:
+                    assert callable(func)
+            else:
+                assert callable(producer_func)
         except:
-            raise AssertionError('must provide a callable function')
+            raise AssertionError('must provide a callable function for producer')
         try:
-            assert isgeneratorfunction(producer_func)
+            if self._multiple_producers:
+                for func in producer_func:
+                    assert isgeneratorfunction(func)
+            else:
+                assert isgeneratorfunction(producer_func)
         except:
-            raise AssertionError('producer function must be a generator function')
+            raise AssertionError('producer function(s) must (all) be a generator function')
         try:
             assert isinstance(pipe_funcs, tuple)
         except:
-            raise AssertionError('must supply a tuple of callable functions')
+            raise AssertionError('must supply a tuple of callable functions for pipe_funcs')
         for pf in pipe_funcs:
             try:
                 assert callable(pf)
@@ -420,7 +465,11 @@ class SimpleCollectorPipeline:
                 raise AssertionError('all elements inside of pipe_funcs must be callable functions')
         # check arguments
         try:
-            assert isinstance(producer_config_args, tuple)
+            if self._multiple_producers:
+                for args in producer_config_args:
+                    assert isinstance(args, tuple)
+            else:
+                assert isinstance(producer_config_args, tuple)
         except:
             raise AssertionError('function arguments must be provided as a tuple')
         try:
@@ -496,7 +545,7 @@ class SimpleCollectorPipeline:
         # let user know what they've asked for very clearly
         struct_str = "Running pipeline with structure:\n"
         struct_str += "{} serial transformations, with {} queues\n\n".format(self.N, len(self._queues))
-        struct_str += "Producer: {}\n".format(self.producer_func)
+        struct_str += "Producer(s): {}\n".format(self.producer_func)
         for i in range(self.N):
             struct_str += "\tQueue {}: {}\n".format(i,self._queues[i])
             struct_str += "{} Workers: {}\n".format(self.pipe_n_procs[i], self.pipe_funcs[i])
@@ -504,15 +553,30 @@ class SimpleCollectorPipeline:
         struct_str += "Consumer: {}\n".format(self._consumer_thread)
         info(struct_str)
         # define processes
-        self._producer = Process(
-            target = _producer,
-            args   = (
-                self._queues[0],
-                self._total_produced,
-                self.producer_func,
-                self.producer_config_args
-            ),
-        )
+        self._producers = []
+        if self._multiple_producers:
+            for func, args in zip(self.producer_func, self.producer_config_args):
+                _a_producer = Process(
+                    target = _producer,
+                    args   = (
+                        self._queues[0],
+                        self._total_produced,
+                        func,
+                        args,
+                    ),
+                )
+                self._producers.append(_a_producer)
+        else:
+            _a_producer = Process(
+                target = _producer,
+                args   = (
+                    self._queues[0],
+                    self._total_produced,
+                    self.producer_func,
+                    self.producer_config_args,
+                ),
+            )
+            self._producers.append(_a_producer)
         self._consumer = Thread(
             target = self._consumer_thread,
         )
@@ -540,12 +604,14 @@ class SimpleCollectorPipeline:
         try:
             start_time = time()
             # start all child processes
-            self._producer.start()
+            for p in self._producers:
+                p.start()
             [self._managers[i].start() for i in range(self.N)]
             self._consumer.start()
             # join in order
-            self._producer.join()
-            info('producer completed')
+            for p in self._producers:
+                p.join()
+            info('producer(s) completed')
             for i in range(self.N):
                 self._queues[i].join()
                 self._flags[i].value = int(True)
@@ -584,7 +650,7 @@ class SimpleCollectorPipeline:
         finally:
             info('cleaning up child processes')
             self._sync_server.shutdown()
-            self._producer.terminate()
+            [p.terminate() for p in self._producers]
             [self._managers[i].terminate() for i in range(self.N)]
             # self._consumer.terminate() # daemon Thread will die with owner Process
 
