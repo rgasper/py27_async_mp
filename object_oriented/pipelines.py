@@ -36,7 +36,8 @@ data, just child process info) but it stayed constant during runtime!
 #           only start tracking time once the queue has data?
 # FIXME: add kwargs options to everything
 
-from logging import debug, info, exception
+from logging import debug, info, exception, log, addLevelName
+from functools import partial
 from multiprocessing_logging import install_mp_handler
 from multiprocessing import Process, Manager
 from threading import Thread
@@ -46,6 +47,13 @@ from math import log as ln
 from inspect import isgeneratorfunction
 # TODO from types import GeneratorType
 # from random import randint # used to simulate data loss
+
+# NOTE(gasperr) this is apparently not advised as good practice.
+# special low level log for the multiprocess checkpoint calls
+V_VERBOSE = 1
+addLevelName(V_VERBOSE,'V_VERBOSE') 
+v_verbose = partial(log, V_VERBOSE)
+
 
 def _producer(out_queue, total, producer_func, producer_config_args):
     ''' A generator that pushes stuff into the pipeline, 
@@ -59,7 +67,7 @@ def _producer(out_queue, total, producer_func, producer_config_args):
     for i in producer_func(*producer_config_args):
         out_queue.put(i)
         total.value += 1
-        debug('total produced: {}'.format(total.value))
+        v_verbose('total produced: {}'.format(total.value))
 
 
 def _worker(in_queue, out_queue, worker_func, worker_config_args, worker_get_limit):
@@ -74,7 +82,7 @@ def _worker(in_queue, out_queue, worker_func, worker_config_args, worker_get_lim
     '''
     for _ in range(worker_get_limit):
         i = in_queue.get()
-        debug('working')
+        v_verbose('working')
         r = worker_func(i, *worker_config_args)
         in_queue.task_done()
         out_queue.put(r)
@@ -102,7 +110,7 @@ def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
             consumer_func(r, *consumer_config_args)
             in_queue.task_done()
             # debug('consumed {}, total results: {}'.format(r, total.value))
-            debug('total consumed: {}'.format(total.value))
+            v_verbose('total consumed: {}'.format(total.value))
             total.value += 1
             wait = time() - start
             diff = wait - avg_wait

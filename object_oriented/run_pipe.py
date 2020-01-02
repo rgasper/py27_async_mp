@@ -32,7 +32,7 @@ log_config = {
     "loggers": {
         "": {
             "handlers" : ["stream"],
-            "level"    : "DEBUG", # id recommend changing to info for many elements
+            "level"    : "NOTSET", # id recommend changing to info for many elements
         },
     },
 }
