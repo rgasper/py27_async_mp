@@ -71,34 +71,34 @@ def my_consumer(inp, num_elements, element_size):
         ))
 
 
-info('constructing pipeline')
-etl = SimplePipeline(
-    producer_func           = my_producer,
-    producer_config_args    = (num_elements, element_size),
-    consumer_func           = my_consumer,
-    consumer_config_args    = (num_elements, element_size),
-    pipe_funcs              = tuple([my_worker]*num_serial_workers),
-    pipe_funcs_config_args  = tuple([()]*num_serial_workers),
-    pipe_n_procs            = tuple([num_parallel_workers]*num_serial_workers),
-    worker_get_limit        = worker_get_limit
-)
-etl.run()
-info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
+# info('constructing pipeline')
+# etl = SimplePipeline(
+#     producer_func           = my_producer,
+#     producer_config_args    = (num_elements, element_size),
+#     consumer_func           = my_consumer,
+#     consumer_config_args    = (num_elements, element_size),
+#     pipe_funcs              = tuple([my_worker]*num_serial_workers),
+#     pipe_funcs_config_args  = tuple([()]*num_serial_workers),
+#     pipe_n_procs            = tuple([num_parallel_workers]*num_serial_workers),
+#     worker_get_limit        = worker_get_limit
+# )
+# etl.run()
+# info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
 
 
-info('constructing pipeline with multiple producers')
-etl = SimplePipeline(
-    producer_func           = (my_producer, my_producer,),
-    producer_config_args    = ((num_elements, element_size), (num_elements, element_size),),
-    consumer_func           = my_consumer,
-    consumer_config_args    = (num_elements, element_size,),
-    pipe_funcs              = tuple([my_worker]*num_serial_workers),
-    pipe_funcs_config_args  = tuple([()]*num_serial_workers),
-    pipe_n_procs            = tuple([num_parallel_workers]*num_serial_workers),
-    worker_get_limit        = worker_get_limit
-)
-etl.run()
-info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
+# info('constructing pipeline with multiple producers')
+# etl = SimplePipeline(
+#     producer_func           = (my_producer, my_producer,),
+#     producer_config_args    = ((num_elements, element_size), (num_elements, element_size),),
+#     consumer_func           = my_consumer,
+#     consumer_config_args    = (num_elements, element_size,),
+#     pipe_funcs              = tuple([my_worker]*num_serial_workers),
+#     pipe_funcs_config_args  = tuple([()]*num_serial_workers),
+#     pipe_n_procs            = tuple([num_parallel_workers]*num_serial_workers),
+#     worker_get_limit        = worker_get_limit
+# )
+# etl.run()
+# info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
 
 
 info('constructing collector pipeline')
@@ -116,16 +116,16 @@ for result in results:
 info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
 
 
-info('constructing collector pipeline with multiple producers')
-etl = SimpleCollectorPipeline(
-    producer_func           = (my_producer, my_producer,),
-    producer_config_args    = ((num_elements, element_size), (num_elements, element_size),),
-    pipe_funcs              = tuple([my_worker]*num_serial_workers),
-    pipe_funcs_config_args  = tuple([()]*num_serial_workers),
-    pipe_n_procs            = tuple([num_parallel_workers]*num_serial_workers),
-    worker_get_limit        = worker_get_limit
-)
-results = etl.run()
-for result in results:
-    my_consumer(result, num_elements, element_size)
-info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
+# info('constructing collector pipeline with multiple producers')
+# etl = SimpleCollectorPipeline(
+#     producer_func           = (my_producer, my_producer,),
+#     producer_config_args    = ((num_elements, element_size), (num_elements, element_size),),
+#     pipe_funcs              = tuple([my_worker]*num_serial_workers),
+#     pipe_funcs_config_args  = tuple([()]*num_serial_workers),
+#     pipe_n_procs            = tuple([num_parallel_workers]*num_serial_workers),
+#     worker_get_limit        = worker_get_limit
+# )
+# results = etl.run()
+# for result in results:
+#     my_consumer(result, num_elements, element_size)
+# info('no major errors in main process, check logs to see if there was data loss or issues in child processes')

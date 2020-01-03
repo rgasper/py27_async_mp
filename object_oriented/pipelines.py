@@ -36,7 +36,7 @@ data, just child process info) but it stayed constant during runtime!
 #           only start tracking time once the queue has data?
 # FIXME: add kwargs options to everything
 
-from logging import debug, info, exception, log, addLevelName
+from logging import debug, info, exception, critical, error, log, addLevelName
 from functools import partial
 from multiprocessing_logging import install_mp_handler
 from multiprocessing import Process, Manager
@@ -46,7 +46,7 @@ from queue import Empty
 from math import log as ln
 from inspect import isgeneratorfunction
 # TODO from types import GeneratorType
-# from random import randint # used to simulate data loss
+from random import randint # used to simulate data loss
 
 # NOTE(gasperr) this is apparently not advised as good practice.
 # special low level log for the multiprocess checkpoint calls
@@ -55,22 +55,33 @@ addLevelName(V_VERBOSE,'V_VERBOSE')
 v_verbose = partial(log, V_VERBOSE)
 
 
-def _producer(out_queue, total, producer_func, producer_config_args):
+def _producer(out_queue, total, producer_func, producer_config_args, error_flag):
     ''' A generator that pushes stuff into the pipeline, 
     dies when there is no more work 
     :params:
         out_queue - multiprocessing.Queue: where to put outgoing data
         total - multiprocessing.Value: track how many elements were generated
         producer_func - callable, generator: generates data
-        producer_config_args - tuple: - any arguments required by producer_func'''
+        producer_config_args - tuple: - any arguments required by producer_func
+        error_flag: multiprocessing.Value- flag that child uses to tell parents it died in error
+    '''
     info('starting')
-    for i in producer_func(*producer_config_args):
-        out_queue.put(i)
-        total.value += 1
-        v_verbose('total produced: {}'.format(total.value))
+    try:
+        for i in producer_func(*producer_config_args):
+            out_queue.put(i)
+            total.value += 1
+            v_verbose('total produced: {}'.format(total.value))
+    except:
+        exception('error:')
+        try:
+            error_flag.value = int(True)
+        except:
+            # NOTE(gasperr) occurs only when there has been an early termination
+            pass
+        raise
 
 
-def _worker(in_queue, out_queue, worker_func, worker_config_args, worker_get_limit):
+def _worker(in_queue, out_queue, worker_func, worker_config_args, worker_get_limit, error_flag):
     ''' grabs input, does some work, pushes results, and dies. Not intended to run
     on its own but to be created by a _manager
     :params:
@@ -79,45 +90,69 @@ def _worker(in_queue, out_queue, worker_func, worker_config_args, worker_get_lim
         worker_func - callable: does something to the data
         worker_config_args - tuple: all arguments except first (input data) for worker
         worker_get_limit: int- number of times worker gets and processes data before dying
+        error_flag: multiprocessing.Value- flag that child uses to tell parents it died in error
     '''
-    for _ in range(worker_get_limit):
-        i = in_queue.get()
-        v_verbose('working')
-        r = worker_func(i, *worker_config_args)
-        in_queue.task_done()
-        out_queue.put(r)
+    try:
+        for _ in range(worker_get_limit):
+            i = in_queue.get()
+            v_verbose('working')
+            r = worker_func(i, *worker_config_args)
+            in_queue.task_done()
+            out_queue.put(r)
+            # if randint(1,20) == 5:
+            #     raise RuntimeError('a worker stubbed its toe')
+    except:
+        exception('error:')
+        try:
+            error_flag.value = int(True)
+        except:
+            # NOTE(gasperr) occurs only when there has been an early termination
+            pass
+        raise
 
 
-def _consumer(in_queue, total, consumer_func, consumer_config_args, flag):
+def _consumer(in_queue, total, consumer_func, consumer_config_args, done_flag, error_flag):
     ''' does something with the pipeline results, like writing to storage    
     :params:
         in_queue - multiprocessing.Queue: where to get incoming data
         total - multiprocessing.Value: track how many elements were consumed
         consumer_func - callable: does the consuming work
         consumer_config_args - tuple: - all arguments except first (input data) for consumer
-        flag: multiprocessing.Value- flag provided that indicates no further input data
+        done_flag: multiprocessing.Value- flag provided that indicates no further input data
+        error_flag: multiprocessing.Value- flag that child uses to tell parents it died in error
     '''
     info('started')
-    avg_wait = 0
-    while True:
-        sleep(max((0.01, avg_wait/5)))
-        start = time()
-        if bool(flag.value) and in_queue.empty():
-            debug("consumer input queue is closed and empty")
-            break
+    try:
+        avg_wait = 0
+        while True:
+            sleep(max((0.01, avg_wait/5)))
+            start = time()
+            if bool(done_flag.value) and in_queue.empty():
+                debug("consumer input queue is closed and empty")
+                break
+            try:
+                r = in_queue.get_nowait()
+                consumer_func(r, *consumer_config_args)
+                in_queue.task_done()
+                # debug('consumed {}, total results: {}'.format(r, total.value))
+                v_verbose('total consumed: {}'.format(total.value))
+                total.value += 1
+                wait = time() - start
+                diff = wait - avg_wait
+                avg_wait += float(diff)/total.value
+                # if randint(1,10) == 5:
+                #     raise RuntimeError('the consumer got shocked by static electricity')
+            except Empty:
+                continue
+        info('completed')
+    except:
+        exception('error:')
         try:
-            r = in_queue.get_nowait()
-            consumer_func(r, *consumer_config_args)
-            in_queue.task_done()
-            # debug('consumed {}, total results: {}'.format(r, total.value))
-            v_verbose('total consumed: {}'.format(total.value))
-            total.value += 1
-            wait = time() - start
-            diff = wait - avg_wait
-            avg_wait += float(diff)/total.value
-        except Empty:
-            continue
-    info('completed')
+            error_flag.value = int(True)
+        except:
+            # NOTE(gasperr) occurs only when there has been an early termination
+            pass
+        raise
 
 
 def _proc_manager(
@@ -296,12 +331,33 @@ class SimplePipeline:
         self._sync_server = Manager()
         # 1 manager for each pipe func
         self._managers = [None for _ in range(self.N)]
+        self._error_flag = self._sync_server.Value('i', int(False))
         # 1 producer finished flag for each manager, 1 for the consumer
-        self._flags = [self._sync_server.Value('i',0) for _ in range(self.N+1)]
+        self._flags = [self._sync_server.Value('i',int(False)) for _ in range(self.N+1)]
         # 1 out(in) queue per pipe_func, + 1 extra in(out)
         self._queues = [self._sync_server.Queue() for _ in range(self.N+1)]
-        self._total_produced = self._sync_server.Value('i',0)
-        self._total_consumed = self._sync_server.Value('i',0)
+        self._total_produced = self._sync_server.Value('i',int(False))
+        self._total_consumed = self._sync_server.Value('i',int(False))
+
+    def cleanup(self):
+        critical('cleaning up all child processes, ignore EOFError or IOError after this')
+        [p.terminate() for p in self._producers]
+        [self._managers[i].terminate() for i in range(self.N)]
+        self._consumer.terminate()
+        self._sync_server.shutdown()
+        # all threads (babysitter) will terminate with main thread
+
+    def _child_error_checker(self):
+        ''' a thread that checks if a child died in error, using a shared flag'''
+        while True:
+            sleep(0.1)
+            try:
+                if bool(self._error_flag.value):
+                    error('cleaning up due to child process error. Check logs and stdout.')
+                    self.cleanup()
+            except IOError:
+                # self._sync_server has been shutdown
+                break
 
     def run(self):
         ''' execute the pipeline '''
@@ -316,6 +372,10 @@ class SimplePipeline:
         struct_str += "Consumer: {}\n".format(self.consumer_func)
         info(struct_str)
         # define processes
+        self._babysitter = Thread(
+            target = self._child_error_checker,
+            args   = (),
+        )
         self._producers = []
         if self._multiple_producers:
             for func, args in zip(self.producer_func, self.producer_config_args):
@@ -326,6 +386,7 @@ class SimplePipeline:
                         self._total_produced,
                         func,
                         args,
+                        self._error_flag,
                     ),
                 )
                 self._producers.append(_a_producer)
@@ -337,6 +398,7 @@ class SimplePipeline:
                     self._total_produced,
                     self.producer_func,
                     self.producer_config_args,
+                    self._error_flag,
                 ),
             )
             self._producers.append(_a_producer)
@@ -347,7 +409,8 @@ class SimplePipeline:
                 self._total_consumed,
                 self.consumer_func,
                 self.consumer_config_args,
-                self._flags[-1]
+                self._flags[-1],
+                self._error_flag,
             ),
         )
         for i in range(self.N):
@@ -362,7 +425,8 @@ class SimplePipeline:
                         self._queues[i+1],
                         self.pipe_funcs[i],
                         self.pipe_funcs_config_args[i],
-                        self.worker_get_limit
+                        self.worker_get_limit,
+                        self._error_flag,
                     ),
                     self.pipe_n_procs[i],
                     self._flags[i],
@@ -372,6 +436,8 @@ class SimplePipeline:
         try:
             start_time = time()
             # start all child processes
+            # NOTE(gasperr) babysitter is started but never joined
+            self._babysitter.start()
             for p in self._producers:
                 p.start()
             [self._managers[i].start() for i in range(self.N)]
@@ -408,15 +474,11 @@ class SimplePipeline:
                 r = rate,
             ))
             return
-        except KeyboardInterrupt:
-            exception('user terminated pipeline')
+        except (KeyboardInterrupt, SystemExit):
+            exception('pipeline terminated by an external command')
             raise
         finally:
-            info('cleaning up child processes')
-            self._sync_server.shutdown()
-            [p.terminate() for p in self._producers]
-            [self._managers[i].terminate() for i in range(self.N)]
-            self._consumer.terminate()
+            self.cleanup()
 
 
 class SimpleCollectorPipeline:
@@ -516,6 +578,7 @@ class SimpleCollectorPipeline:
         self._sync_server = Manager()
         # 1 manager for each pipe func
         self._managers = [None for _ in range(self.N)]
+        self._error_flag = self._sync_server.Value('i', int(False))
         # 1 producer finished flag for each manager, 1 for the consumer
         self._flags = [self._sync_server.Value('i',0) for _ in range(self.N+1)]
         # 1 out(in) queue per pipe_func, + 1 extra in(out)
@@ -524,29 +587,57 @@ class SimpleCollectorPipeline:
         self._total_consumed = 0
         self._results = []
 
+    def cleanup(self):
+        critical('cleaning up all child processes, ignore EOFError or IOError after this')
+        [p.terminate() for p in self._producers]
+        [self._managers[i].terminate() for i in range(self.N)]
+        self._sync_server.shutdown()
+        # all threads (consumer and babysitter) will terminate with main thread
+
+    def _child_error_checker(self):
+        ''' a thread that checks if a child died in error, using a shared flag'''
+        while True:
+            sleep(0.1)
+            try:
+                if bool(self._error_flag.value):
+                    error('cleaning up due to child process error. Check logs and stdout.')
+                    self.cleanup()
+            except IOError:
+                # self._sync_server has been shutdown
+                break
+
     def _consumer_thread(self):
         ''' a thread function that collects pipeline results into self._results '''
         info('started')
-        avg_wait = 0
-        while True:
-            sleep(max((0.01, avg_wait/5)))
-            start = time()
-            if bool(self._flags[-1].value) and self._queues[-1].empty():
-                debug("consumer input queue is closed and empty")
-                break
+        try:
+            avg_wait = 0
+            while True:
+                sleep(max((0.01, avg_wait/5)))
+                start = time()
+                if bool(self._flags[-1].value) and self._queues[-1].empty():
+                    debug("consumer input queue is closed and empty")
+                    break
+                try:
+                    r = self._queues[-1].get_nowait()
+                    self._results += [r]
+                    self._queues[-1].task_done()
+                    # debug('consumed {}, total results: {}'.format(r, self._total_consumed))
+                    debug('total consumed: {}'.format(self._total_consumed))
+                    self._total_consumed += 1
+                    wait = time() - start
+                    diff = wait - avg_wait
+                    avg_wait += float(diff)/self._total_consumed
+                except Empty:
+                    continue
+            info('completed')
+        except:
+            exception('error:')
             try:
-                r = self._queues[-1].get_nowait()
-                self._results += [r]
-                self._queues[-1].task_done()
-                # debug('consumed {}, total results: {}'.format(r, self._total_consumed))
-                debug('total consumed: {}'.format(self._total_consumed))
-                self._total_consumed += 1
-                wait = time() - start
-                diff = wait - avg_wait
-                avg_wait += float(diff)/self._total_consumed
-            except Empty:
-                continue
-        info('completed')
+                self._error_flag.value = int(True)
+            except:
+                # NOTE(gasperr) occurs only when there has been an early termination
+                pass
+            raise
             
     def run(self):
         ''' execute the pipeline '''
@@ -561,6 +652,10 @@ class SimpleCollectorPipeline:
         struct_str += "Consumer: {}\n".format(self._consumer_thread)
         info(struct_str)
         # define processes
+        self._babysitter = Thread(
+            target = self._child_error_checker,
+            args   = (),
+        )
         self._producers = []
         if self._multiple_producers:
             for func, args in zip(self.producer_func, self.producer_config_args):
@@ -571,6 +666,7 @@ class SimpleCollectorPipeline:
                         self._total_produced,
                         func,
                         args,
+                        self._error_flag,
                     ),
                 )
                 self._producers.append(_a_producer)
@@ -582,13 +678,14 @@ class SimpleCollectorPipeline:
                     self._total_produced,
                     self.producer_func,
                     self.producer_config_args,
+                    self._error_flag,
                 ),
             )
             self._producers.append(_a_producer)
         self._consumer = Thread(
             target = self._consumer_thread,
         )
-        # consumer must be daemonized so it doesn't block raising for KeyboardInterrupt
+        # consumer must be daemonized so it doesn't block raising
         self._consumer.daemon = True
         for i in range(self.N):
             self._managers[i] = Process(
@@ -602,7 +699,8 @@ class SimpleCollectorPipeline:
                         self._queues[i+1],
                         self.pipe_funcs[i],
                         self.pipe_funcs_config_args[i],
-                        self.worker_get_limit
+                        self.worker_get_limit,
+                        self._error_flag,
                     ),
                     self.pipe_n_procs[i],
                     self._flags[i],
@@ -612,6 +710,7 @@ class SimpleCollectorPipeline:
         try:
             start_time = time()
             # start all child processes
+            self._babysitter.start()
             for p in self._producers:
                 p.start()
             [self._managers[i].start() for i in range(self.N)]
@@ -652,15 +751,11 @@ class SimpleCollectorPipeline:
                 r = rate,
             ))
             return self._results
-        except KeyboardInterrupt:
-            exception('user terminated pipeline')
+        except (KeyboardInterrupt, SystemExit):
+            exception('pipeline terminated by an external command')
             raise
         finally:
-            info('cleaning up child processes')
-            self._sync_server.shutdown()
-            [p.terminate() for p in self._producers]
-            [self._managers[i].terminate() for i in range(self.N)]
-            # self._consumer.terminate() # daemon Thread will die with owner Process
+            self.cleanup()
 
 if __name__ == "__main__":
     raise NotImplementedError('use async_main.py')
