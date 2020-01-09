@@ -111,40 +111,27 @@ def _worker(in_queue, out_queue, worker_func, worker_config_args, worker_get_lim
         raise
 
 
-def _consumer(in_queue, total, consumer_func, consumer_config_args, done_flag, error_flag):
-    ''' does something with the pipeline results, like writing to storage    
+def _consumer(in_queue, total, consumer_func, consumer_config_args, worker_get_limit, error_flag):
+    ''' grabs input, does some work, pushes results, and dies. Not intended to run
+    on its own but to be created by a _manager
     :params:
         in_queue - multiprocessing.Queue: where to get incoming data
         total - multiprocessing.Value: track how many elements were consumed
         consumer_func - callable: does the consuming work
         consumer_config_args - tuple: - all arguments except first (input data) for consumer
-        done_flag: multiprocessing.Value- flag provided that indicates no further input data
+        worker_get_limit: int- number of times worker gets and processes data before dying
         error_flag: multiprocessing.Value- flag that child uses to tell parents it died in error
     '''
-    info('started')
     try:
-        avg_wait = 0
-        while True:
-            sleep(max((0.01, avg_wait/5)))
-            start = time()
-            if bool(done_flag.value) and in_queue.empty():
-                debug("consumer input queue is closed and empty")
-                break
-            try:
-                r = in_queue.get_nowait()
-                consumer_func(r, *consumer_config_args)
-                in_queue.task_done()
-                # debug('consumed {}, total results: {}'.format(r, total.value))
-                v_verbose('total consumed: {}'.format(total.value))
-                total.value += 1
-                wait = time() - start
-                diff = wait - avg_wait
-                avg_wait += float(diff)/total.value
-                # if randint(1,10) == 5:
-                #     raise RuntimeError('the consumer got shocked by static electricity')
-            except Empty:
-                continue
-        info('completed')
+        for _ in range(worker_get_limit):
+            i = in_queue.get()
+            v_verbose('working')
+            consumer_func(i, *consumer_config_args)
+            in_queue.task_done()
+            v_verbose('total consumed: {}'.format(total.value))
+            total.value += 1
+            # if randint(1,10) == 5:
+            #     raise RuntimeError('the consumer got shocked by static electricity')
     except:
         exception('error:')
         try:
@@ -156,7 +143,7 @@ def _consumer(in_queue, total, consumer_func, consumer_config_args, done_flag, e
 
 
 def _proc_manager(
-    tag, in_queue, worker_func, worker_args, n_processes, flag, worker_get_limit
+    tag, in_queue, worker_func, worker_args, n_processes, flag
     ):
     ''' process that manages a set of concurrent daemon child processes. Constantly restarts processes
     in order to clear up memory
@@ -168,7 +155,6 @@ def _proc_manager(
         worker_args: tuple- positional arguments for worker function
         n_processes: int- number concurrent processes
         flag: multiprocessing.Value- flag provided that indicates no further input data
-        worker_get_limit: int- number of times workers get and process data before dying
     '''
     # NOTE: NEVER pull work element data into the manager. This could cause memory leaks.
     # all tracking data is statically sized (or the best we can do in python)- keeps memory use bounded
@@ -403,14 +389,21 @@ class SimplePipeline:
             )
             self._producers.append(_a_producer)
         self._consumer = Process(
-            target = _consumer,
-            args   = (
+            target = _proc_manager,
+            args = (
+                'consumer',
                 self._queues[-1],
-                self._total_consumed,
-                self.consumer_func,
-                self.consumer_config_args,
+                _consumer,
+                (
+                    self._queues[-1],
+                    self._total_consumed,
+                    self.consumer_func,
+                    self.consumer_config_args,
+                    self.worker_get_limit,
+                    self._error_flag,
+                ),
+                1,
                 self._flags[-1],
-                self._error_flag,
             ),
         )
         for i in range(self.N):
@@ -430,7 +423,6 @@ class SimplePipeline:
                     ),
                     self.pipe_n_procs[i],
                     self._flags[i],
-                    self.worker_get_limit
                 ),
             )
         try:
@@ -704,7 +696,6 @@ class SimpleCollectorPipeline:
                     ),
                     self.pipe_n_procs[i],
                     self._flags[i],
-                    self.worker_get_limit
                 ),
             )
         try:
