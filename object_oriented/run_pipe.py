@@ -7,12 +7,13 @@ logging works, memory is stable, CTRL-c works as fast as the workers can get to 
 and exit is always clean - no child process left behind.
 -nice-
 '''
-from pipelines import SimplePipeline, SimpleCollectorPipeline
+from pipelines import SimplePipeline, SimpleCollectorPipeline, SimpleAccumulatorPipeline
 
 from logging.config import dictConfig
-from logging import debug, info, error
+from logging import debug, info, error, exception
 from random import randint
 from time import sleep
+from collections import defaultdict
 
 log_config = {
     "version": 1,
@@ -70,20 +71,56 @@ def my_consumer(inp, num_elements, element_size):
             inp
         ))
 
+# first argument is input data, second argument is the accumulation so far
+def my_accumulator(inp, acc):
+    ''' builds a counts dictionary of elements it sees 
+    inp is a list of hashables
+    acc is a defaultdict(int)
+    '''
+    for element in inp:
+        acc[element] += 1
+    return acc
+
 
 info('constructing pipeline')
-etl = SimplePipeline(
+etl = SimpleAccumulatorPipeline(
     producer_func           = my_producer,
     producer_config_args    = (num_elements, element_size),
-    consumer_func           = my_consumer,
-    consumer_config_args    = (num_elements, element_size),
     pipe_funcs              = tuple([my_worker]*num_serial_workers),
     pipe_funcs_config_args  = tuple([()]*num_serial_workers),
     pipe_n_procs            = tuple([num_parallel_workers]*num_serial_workers),
+    accumulator_object      = defaultdict(int),
+    accumulator_func        = my_accumulator,
+    accumulator_config_args = tuple(),
     worker_get_limit        = worker_get_limit
 )
-etl.run()
+acc = etl.run()
+count_of_hits = acc[0]
+for key, value in acc.iteritems():
+    try:
+        assert value == count_of_hits
+    except AssertionError:
+        exception('value {} at key {} didnt have a consistent match with {}'.format(
+            value,
+            key,
+            count_of_hits
+        ))
 info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
+
+
+# info('constructing pipeline')
+# etl = SimplePipeline(
+#     producer_func           = my_producer,
+#     producer_config_args    = (num_elements, element_size),
+#     consumer_func           = my_consumer,
+#     consumer_config_args    = (num_elements, element_size),
+#     pipe_funcs              = tuple([my_worker]*num_serial_workers),
+#     pipe_funcs_config_args  = tuple([()]*num_serial_workers),
+#     pipe_n_procs            = tuple([num_parallel_workers]*num_serial_workers),
+#     worker_get_limit        = worker_get_limit
+# )
+# etl.run()
+# info('no major errors in main process, check logs to see if there was data loss or issues in child processes')
 
 
 # info('constructing pipeline with multiple producers')

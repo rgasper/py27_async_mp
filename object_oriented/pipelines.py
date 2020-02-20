@@ -748,5 +748,292 @@ class SimpleCollectorPipeline:
         finally:
             self.cleanup()
 
+class SimpleAccumulatorPipeline:
+    ''' See SimplePipeline. This is similar, but instead of immediately dumping
+    data into a consumer, this accumulates the data into a specific object using
+    a specific provided function that has the data to be accumulated as the first
+    argument, and the current accumulation as the second argument
+
+    If pipeline produces too much data, this will obviously cause memory issues. Use
+    SimplePipeline with a consumer writing to disk instead, then pick it up after
+    '''
+    def __init__(self, 
+        producer_func, producer_config_args,
+        pipe_funcs, pipe_funcs_config_args, pipe_n_procs,
+        accumulator_object,
+        accumulator_func,
+        accumulator_config_args,
+        worker_get_limit=5):
+        # enforce the contract.
+        try:
+            assert isinstance(worker_get_limit, int) and worker_get_limit > 1
+        except AssertionError:
+            raise AssertionError('worker_get_limit must be an integer > 1')
+        # allow multiple producers
+        self._multiple_producers = isinstance(producer_func, tuple)
+        # check functions
+        try:
+            if self._multiple_producers:
+                for func in producer_func:
+                    assert callable(func)
+            else:
+                assert callable(producer_func)
+        except AssertionError:
+            raise AssertionError('must provide a callable function for producer')
+        try:
+            if self._multiple_producers:
+                for func in producer_func:
+                    assert isgeneratorfunction(func)
+            else:
+                assert isgeneratorfunction(producer_func)
+        except AssertionError:
+            raise AssertionError('producer function(s) must (all) be a generator function')
+        try:
+            assert isinstance(pipe_funcs, tuple)
+        except AssertionError:
+            raise AssertionError('must supply a tuple of callable functions for pipe_funcs')
+        for pf in pipe_funcs:
+            try:
+                assert callable(pf)
+            except AssertionError:
+                raise AssertionError('all elements inside of pipe_funcs must be callable functions')
+        # check arguments
+        try:
+            if self._multiple_producers:
+                for args in producer_config_args:
+                    assert isinstance(args, tuple)
+            else:
+                assert isinstance(producer_config_args, tuple)
+        except AssertionError:
+            raise AssertionError('function arguments must be provided as a tuple')
+        try:
+            assert isinstance(pipe_funcs_config_args, tuple)            
+            for pfa in pipe_funcs_config_args:
+                assert isinstance(pfa, tuple)
+        except AssertionError:
+            raise AssertionError('pipe function arguments must be provided as a tuple of tuples')
+        # check procs
+        try:
+            assert isinstance(pipe_n_procs, tuple)
+            for n in pipe_n_procs:
+                assert isinstance(n, int)
+        except AssertionError:
+            raise AssertionError('must provide a tuple of integers')
+        # check agreement between corellated inputs
+        try:
+            assert len(pipe_funcs) == len(pipe_funcs_config_args) and len(pipe_funcs) == len(pipe_n_procs)
+        except AssertionError:
+            raise AssertionError('must provide one tuple of arguments and a number of processes for each pipe function')
+        try:
+            assert len(pipe_funcs) != 0
+        except AssertionError:
+            raise AssertionError('must provide work for the pipe to do')
+        # check accumulator function
+        try:
+            assert callable(accumulator_func)
+        except AssertionError:
+            raise AssertionError('must provide callable function for accumulator_func')
+        # check accumulator args
+        try:
+            assert isinstance(accumulator_config_args, tuple)
+        except AssertionError:
+            raise AssertionError('must privde a tuple of arguments for accumulator_config_args')
+        # contract satisfied
+        self.N = len(pipe_funcs) # used all over in here
+        # setup handlers to send child process logs into main thread's logger
+        install_mp_handler()
+        self.producer_func = producer_func
+        self.producer_config_args = producer_config_args
+        self.pipe_funcs = pipe_funcs
+        self.pipe_funcs_config_args = pipe_funcs_config_args
+        self.pipe_n_procs = pipe_n_procs
+        self.accumulator_object = accumulator_object
+        self.accumulator_func = accumulator_func
+        self.accumulator_config_args = accumulator_config_args
+        self.worker_get_limit = worker_get_limit
+        # use a manager server to make cleanup easy
+        self._sync_server = Manager()
+        # 1 manager for each pipe func
+        self._managers = [None for _ in range(self.N)]
+        self._error_flag = self._sync_server.Value('i', int(False))
+        # 1 producer finished flag for each manager, 1 for the consumer
+        self._flags = [self._sync_server.Value('i',0) for _ in range(self.N+1)]
+        # 1 out(in) queue per pipe_func, + 1 extra in(out)
+        self._queues = [self._sync_server.Queue() for _ in range(self.N+1)]
+        self._total_produced = self._sync_server.Value('i',0)
+        self._total_consumed = 0
+
+    def cleanup(self):
+        critical('cleaning up all child processes, ignore EOFError or IOError after this')
+        [p.terminate() for p in self._producers]
+        [self._managers[i].terminate() for i in range(self.N)]
+        self._sync_server.shutdown()
+        # all threads (consumer and babysitter) will terminate with main thread
+
+    def _child_error_checker(self):
+        ''' a thread that checks if a child died in error, using a shared flag'''
+        while True:
+            sleep(0.1)
+            try:
+                if bool(self._error_flag.value):
+                    error('cleaning up due to child process error. Check logs and stdout.')
+                    self.cleanup()
+            except IOError:
+                # self._sync_server has been shutdown
+                break
+
+    def _accumulation_thread(self):
+        ''' a thread function that collects pipeline results into accumulator_object '''
+        info('started')
+        try:
+            avg_wait = 0
+            while True:
+                sleep(max((0.01, avg_wait/5)))
+                start = time()
+                if bool(self._flags[-1].value) and self._queues[-1].empty():
+                    debug("accumulator input queue is closed and empty")
+                    break
+                try:
+                    r = self._queues[-1].get_nowait()
+                    self.accumulator_object = self.accumulator_func(
+                        r,
+                        self.accumulator_object,
+                        *self.accumulator_config_args
+                    )
+                    self._queues[-1].task_done()
+                    debug('total consumed: {}'.format(self._total_consumed))
+                    self._total_consumed += 1
+                    wait = time() - start
+                    diff = wait - avg_wait
+                    avg_wait += float(diff)/self._total_consumed
+                except Empty:
+                    continue
+            info('completed')
+        except:
+            exception('error:')
+            try:
+                self._error_flag.value = int(True)
+            except:
+                # NOTE(gasperr) occurs only when there has been an early termination
+                pass
+            raise
+            
+    def run(self):
+        ''' execute the pipeline '''
+        # let user know what they've asked for very clearly
+        struct_str = "Running pipeline with structure:\n"
+        struct_str += "{} serial transformations, with {} queues\n\n".format(self.N, len(self._queues))
+        struct_str += "Producer(s): {}\n".format(self.producer_func)
+        for i in range(self.N):
+            struct_str += "\tQueue {}: {}\n".format(i,self._queues[i])
+            struct_str += "{} Workers: {}\n".format(self.pipe_n_procs[i], self.pipe_funcs[i])
+        struct_str += "\tQueue {}: {}\n".format(self.N, self._queues[self.N])
+        struct_str += "Consumer: {}\n".format(self._accumulation_thread)
+        info(struct_str)
+        # define processes
+        self._babysitter = Thread(
+            target = self._child_error_checker,
+            args   = (),
+        )
+        self._producers = []
+        if self._multiple_producers:
+            for func, args in zip(self.producer_func, self.producer_config_args):
+                _a_producer = Process(
+                    target = _producer,
+                    args   = (
+                        self._queues[0],
+                        self._total_produced,
+                        func,
+                        args,
+                        self._error_flag,
+                    ),
+                )
+                self._producers.append(_a_producer)
+        else:
+            _a_producer = Process(
+                target = _producer,
+                args   = (
+                    self._queues[0],
+                    self._total_produced,
+                    self.producer_func,
+                    self.producer_config_args,
+                    self._error_flag,
+                ),
+            )
+            self._producers.append(_a_producer)
+        self._consumer = Thread(
+            target = self._accumulation_thread,
+        )
+        # consumer must be daemonized so it doesn't block raising
+        self._consumer.daemon = True
+        for i in range(self.N):
+            self._managers[i] = Process(
+                target = _proc_manager,
+                args = (
+                    i,
+                    self._queues[i],
+                    _worker,
+                    (
+                        self._queues[i],
+                        self._queues[i+1],
+                        self.pipe_funcs[i],
+                        self.pipe_funcs_config_args[i],
+                        self.worker_get_limit,
+                        self._error_flag,
+                    ),
+                    self.pipe_n_procs[i],
+                    self._flags[i],
+                ),
+            )
+        try:
+            start_time = time()
+            # start all child processes
+            self._babysitter.start()
+            for p in self._producers:
+                p.start()
+            [self._managers[i].start() for i in range(self.N)]
+            self._consumer.start()
+            # join in order
+            for p in self._producers:
+                p.join()
+            info('producer(s) completed')
+            for i in range(self.N):
+                self._queues[i].join()
+                self._flags[i].value = int(True)
+                info('flagged mgr {}'.format(i))
+                self._managers[i].join()
+            self._queues[-1].join()
+            self._flags[-1].value = int(True)
+            info('flagged consumer')
+            # silly logic to see if the thread is done but allow interrupts to come through
+            while True:
+                self._consumer.join(0.2)
+                if not self._consumer.is_alive():
+                    break
+            # check for data loss, but catch the raise
+            if self._total_consumed != self._total_produced.value:
+                n_lost = self._total_produced.value - self._total_consumed
+                pct_lost = 100 * (1 - float(self._total_consumed)/float(self._total_produced.value))
+                try:
+                    raise Warning('Pipeline appears to have lost {n} data elements, about {p:2f}% of the total produced'.format(n = n_lost, p = pct_lost))
+                except:
+                    exception('DATA LOSS WARNING:')
+            # congratulate ourselves on our success
+            dur = time() - start_time
+            try:
+                rate = float(self._total_consumed)/float(dur)
+            except ZeroDivisionError:
+                rate = float('nan')
+            info('pipeline finished. took {d:2f}s, throughput of approximately {r:2f} elements/second'.format(
+                d = dur,
+                r = rate,
+            ))
+            return self.accumulator_object
+        except (KeyboardInterrupt, SystemExit):
+            exception('pipeline terminated by an external command')
+            raise
+        finally:
+            self.cleanup()
+
 if __name__ == "__main__":
-    raise NotImplementedError('use async_main.py')
+    raise NotImplementedError('use run_pipes.py')
